@@ -1,10 +1,63 @@
 import requests
 import time
 import sys
+import os
+import winsound
 from datetime import datetime
 from rich.console import Console
 from rich.table import Table
 from rich import box
+
+try:
+    import msvcrt
+    WINDOWS = True
+except ImportError:
+    WINDOWS = False
+
+# ================== 资源路径（兼容 PyInstaller） ==================
+def resource_path(relative_path):
+    try:
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
+
+# ================== 音频配置 ==================
+SOUND_ALERT = resource_path("sounds/alert.wav")
+SOUND_NHK   = resource_path("sounds/nhk_bell.wav")
+NHK_BLOCK_DURATION = 6.0
+nhk_block_until = 0.0
+
+def play_sound(file_path, is_nhk=False):
+    global nhk_block_until
+    if not os.path.exists(file_path):
+        return
+    if is_nhk:
+        try:
+            winsound.PlaySound(file_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+            nhk_block_until = time.time() + NHK_BLOCK_DURATION
+        except Exception:
+            pass
+    else:
+        if time.time() < nhk_block_until:
+            return
+        try:
+            winsound.PlaySound(file_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+        except Exception:
+            pass
+
+def is_high_intensity(intensity_str):
+    if not intensity_str:
+        return False
+    s = intensity_str.strip().lower()
+    if s == '7':
+        return True
+    if s.startswith('6'):
+        high_patterns = ['弱', '-', 'lower', '强', '+', 'upper', '強']
+        for pat in high_patterns:
+            if pat in s:
+                return True
+    return False
 
 # ================== 预警配置区 ==================
 SOURCE_NAMES = {
@@ -24,6 +77,7 @@ FILTER_CONFIG = {
 # ============================================
 
 processed_events = set()
+high_intensity_state = {}
 console = Console()
 
 def print_earthquake_table(title, rows):
@@ -37,6 +91,7 @@ def print_earthquake_table(title, rows):
     console.print(table)
 
 def process_jma_eew(data):
+    global nhk_block_until
     event_id = data.get('EventID', '')
     serial = data.get('Serial', 1)
     report_key = f"jma_{event_id}_serial_{serial}"
@@ -44,11 +99,19 @@ def process_jma_eew(data):
         return
     processed_events.add(report_key)
 
+    max_intensity = data.get('MaxIntensity', 'N/A')
+    current_high = is_high_intensity(max_intensity)
+    prev_high = high_intensity_state.get(event_id, False)
+
+    play_sound(SOUND_ALERT, is_nhk=False)
+    if current_high and not prev_high:
+        play_sound(SOUND_NHK, is_nhk=True)
+    high_intensity_state[event_id] = current_high
+
     origin_time = data.get('OriginTime', 'N/A')
     hypocenter = data.get('Hypocenter', '未知地区')
     mag = data.get('Magunitude', 'N/A')
     depth = data.get('Depth', 'N/A')
-    max_intensity = data.get('MaxIntensity', 'N/A')
     is_final = data.get('isFinal', False)
     lat = data.get('Latitude')
     lon = data.get('Longitude')
@@ -72,6 +135,7 @@ def process_cenc_eew(data):
     if not event_id or event_id in processed_events:
         return
     processed_events.add(event_id)
+    play_sound(SOUND_ALERT, is_nhk=False)
     origin_time = data.get('OriginTime', data.get('origin_time', 'N/A'))
     hypocenter = data.get('Hypocenter', data.get('hypocenter', '未知地区'))
     mag = data.get('Magunitude', data.get('magnitude', 'N/A'))
@@ -99,6 +163,7 @@ def process_sc_eew(data):
     if not event_id or event_id in processed_events:
         return
     processed_events.add(event_id)
+    play_sound(SOUND_ALERT, is_nhk=False)
     origin_time = data.get('OriginTime', 'N/A')
     hypocenter = data.get('Hypocenter', '未知地区')
     mag = data.get('Magunitude', 'N/A')
@@ -126,6 +191,7 @@ def process_fj_eew(data):
     if not event_id or event_id in processed_events:
         return
     processed_events.add(event_id)
+    play_sound(SOUND_ALERT, is_nhk=False)
     origin_time = data.get('OriginTime', 'N/A')
     hypocenter = data.get('Hypocenter', '未知地区')
     mag = data.get('Magunitude', 'N/A')
@@ -151,6 +217,7 @@ def process_cq_eew(data):
     if not event_id or event_id in processed_events:
         return
     processed_events.add(event_id)
+    play_sound(SOUND_ALERT, is_nhk=False)
     origin_time = data.get('OriginTime', 'N/A')
     hypocenter = data.get('Hypocenter', '未知地区')
     mag = data.get('Magunitude', 'N/A')
@@ -207,14 +274,20 @@ def fetch_and_process():
             pass
 
 def main():
-    console.print("\n[bold yellow]========== Wolfx 地震预警命令行监控程序 v1.1 ==========[/bold yellow]")
-    active_sources = [src for src, active in FILTER_CONFIG.items() if active]
-    console.print(f"[green]已启用的数据源:[/green] {', '.join([SOURCE_NAMES.get(s, s) for s in active_sources])}")
-    console.print("[cyan]每1秒检查一次，有新地震时弹出表格（支持日本气象厅多报更新）。[/cyan]")
-    console.print("[cyan]按 Ctrl+C 退出。[/cyan]\n")
+    console.print("\n[bold yellow]========== Wolfx 地震预警命令行监控程序 v1.2 ==========[/bold yellow]")
+    if not os.path.exists(SOUND_ALERT):
+        console.print("[yellow]提示: 普通提示音文件未找到，将无法播放。[/yellow]")
+    if not os.path.exists(SOUND_NHK):
+        console.print("[yellow]提示: 紧急铃声文件未找到，将无法播放。[/yellow]")
 
-    fetch_and_process()
+    active_sources = [src for src, active in FILTER_CONFIG.items() if active]
+    console.print(f"[green]已启用数据源:[/green] {', '.join([SOURCE_NAMES.get(s, s) for s in active_sources])}")
+    console.print("[cyan]收到新地震时会弹出表格并播放提示音。紧急铃声播放期间普通提示音会被屏蔽。[/cyan]")
+    console.print("[cyan]按 Ctrl+C 可退出程序。[/cyan]\n")
+
+    # 修复：将首次调用也纳入 try 块
     try:
+        fetch_and_process()
         while True:
             time.sleep(1)
             fetch_and_process()

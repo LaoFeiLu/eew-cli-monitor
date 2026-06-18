@@ -37,7 +37,7 @@
 
 - 访问本仓库页面
 - 点击绿色的 **Code** 按钮 → **Download ZIP**
-- 解压到任意文件夹（例如 `C:\earthquake`）
+- 解压到任意文件夹（例如 `C:\eew-cli-monitor`）
   
 2. 获取第三方库
 - 在py文件目录下
@@ -48,7 +48,7 @@ pip install requests rich
 ```
 3. 运行程序
 ```cmd
-python earthquake_monitor.py
+python eew-cli-monitor.py
 ```
 4. 退出程序
    
@@ -57,14 +57,14 @@ python earthquake_monitor.py
 ### 可选：打包成独立可执行文件
 - 结构目录
 ```bash
-earthquake_monitor.py
+eew-cli-monitor.py
 sounds/
     alert.wav
     nhk_bell.wav
 ```
 - 打包命令
 ```bash
-pyinstaller --onefile --console --add-data "sounds/alert.wav;sounds" --add-data "sounds/nhk_bell.wav;sounds" --exclude-module gevent earthquake_monitor.py
+pyinstaller --onefile --console --add-data "sounds/alert.wav;sounds" --add-data "sounds/nhk_bell.wav;sounds" --exclude-module gevent eew-cli-monitor.py
 ```
 - 生成的可执行文件位于 dist/ 目录，双击即可运行。
   
