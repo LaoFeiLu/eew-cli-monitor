@@ -213,9 +213,8 @@ def main():
     console.print("[cyan]每1秒检查一次，有新地震时弹出表格（支持日本气象厅多报更新）。[/cyan]")
     console.print("[cyan]按 Ctrl+C 退出。[/cyan]\n")
 
-    # 将首次调用也放入 try 块，确保 Ctrl+C 能被捕获
+    fetch_and_process()
     try:
-        fetch_and_process()
         while True:
             time.sleep(1)
             fetch_and_process()
