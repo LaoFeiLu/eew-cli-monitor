@@ -3,6 +3,7 @@ import time
 import sys
 import os
 import winsound
+import random
 from datetime import datetime
 from rich.console import Console
 from rich.table import Table
@@ -273,8 +274,92 @@ def fetch_and_process():
         except Exception:
             pass
 
+# ---------- 实验功能：模拟测试 ----------
+def generate_mock_jma_event(serial=1, is_final=False, event_id="MOCK001", intensity=None):
+    base_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    mock_mag = 4.5 + (serial * 0.1)
+    mock_depth = 50 - (serial * 2)
+    if intensity is None:
+        intensity_list = ["1", "2", "3", "4", "5弱", "5强", "6弱", "6強", "7"]
+        max_intensity = intensity_list[min(serial-1, 8)]
+    else:
+        max_intensity = intensity
+    return {
+        "EventID": event_id,
+        "Serial": serial,
+        "OriginTime": base_time,
+        "Hypocenter": f"模拟地震区域 (第{serial}报)",
+        "Magunitude": round(mock_mag, 1),
+        "Depth": max(10, int(mock_depth)),
+        "MaxIntensity": max_intensity,
+        "isFinal": is_final,
+        "Latitude": 35.0 + random.random() * 5,
+        "Longitude": 138.0 + random.random() * 5,
+        "Accuracy": {"Epicenter": "锁", "Depth": "锁", "Magnitude": "锁"},
+        "MaxIntChange": {"String": "无" if serial == 1 else "震度更新"},
+        "WarnArea": [{"Chiiki": "模拟区域A", "Shindo1": max_intensity}]
+    }
+
+def run_mock_test():
+    console.print("\n[bold magenta]========== 模拟测试模式 ==========[/bold magenta]")
+    console.print("[yellow]第一报震度3（普通音），第二报震度6强（触发NHK），第三报震度7（不再触发NHK）[/yellow]")
+    console.print("[cyan]按任意键可中断测试。[/cyan]\n")
+
+    event_id = f"DEMO_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    console.print("[cyan]第一报（震度3）...[/cyan]")
+    process_jma_eew(generate_mock_jma_event(1, False, event_id, intensity="3"))
+    for _ in range(30):
+        if WINDOWS and msvcrt.kbhit():
+            msvcrt.getch()
+            console.print("[yellow]用户中断，退出模拟模式。[/yellow]")
+            return
+        time.sleep(0.1)
+
+    console.print("[cyan]第二报（震度6强）...[/cyan]")
+    process_jma_eew(generate_mock_jma_event(2, False, event_id, intensity="6強"))
+    for _ in range(30):
+        if WINDOWS and msvcrt.kbhit():
+            msvcrt.getch()
+            console.print("[yellow]用户中断，退出模拟模式。[/yellow]")
+            return
+        time.sleep(0.1)
+
+    console.print("[cyan]第三报（震度7）...[/cyan]")
+    process_jma_eew(generate_mock_jma_event(3, True, event_id, intensity="7"))
+
+    console.print("[green]模拟演示完成。按任意键继续...[/green]")
+    if WINDOWS:
+        while True:
+            if msvcrt.kbhit():
+                msvcrt.getch()
+                break
+            time.sleep(0.1)
+    else:
+        input()
+    console.print("[yellow]退出模拟模式。[/yellow]")
+
+def check_user_command():
+    if not WINDOWS:
+        return None
+    if msvcrt.kbhit():
+        line = []
+        while True:
+            ch = msvcrt.getch()
+            if ch == b'\r':
+                break
+            elif ch == b'\x08':
+                if line:
+                    line.pop()
+            else:
+                if 32 <= ch[0] <= 126:
+                    line.append(ch.decode('ascii'))
+        cmd = ''.join(line).strip().lower()
+        return cmd
+    return None
+
+# ================== 主程序 ==================
 def main():
-    console.print("\n[bold yellow]========== Wolfx 地震预警命令行监控程序 v1.2 ==========[/bold yellow]")
+    console.print("\n[bold yellow]========== Wolfx 地震预警命令行监控程序 v1.4 ==========[/bold yellow]")
     if not os.path.exists(SOUND_ALERT):
         console.print("[yellow]提示: 普通提示音文件未找到，将无法播放。[/yellow]")
     if not os.path.exists(SOUND_NHK):
@@ -285,12 +370,16 @@ def main():
     console.print("[cyan]收到新地震时会弹出表格并播放提示音。紧急铃声播放期间普通提示音会被屏蔽。[/cyan]")
     console.print("[cyan]按 Ctrl+C 可退出程序。[/cyan]\n")
 
-    # 修复：将首次调用也纳入 try 块
     try:
         fetch_and_process()
         while True:
-            time.sleep(1)
+            # 检查用户输入的命令（仅 Windows）
+            if WINDOWS:
+                cmd = check_user_command()
+                if cmd == 'test':
+                    run_mock_test()
             fetch_and_process()
+            time.sleep(1)
     except KeyboardInterrupt:
         console.print("\n[bold red]程序已退出，感谢使用！[/bold red]")
         sys.exit(0)
