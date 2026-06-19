@@ -339,15 +339,19 @@ def run_mock_test():
     console.print("[yellow]退出模拟模式。[/yellow]")
 
 def check_user_command():
+    """检测用户输入的命令，支持 test 命令。若检测到 Ctrl+C，主动抛出 KeyboardInterrupt"""
     if not WINDOWS:
         return None
     if msvcrt.kbhit():
         line = []
         while True:
             ch = msvcrt.getch()
-            if ch == b'\r':
+            # 检测 Ctrl+C (ASCII 3)
+            if ch == b'\x03':
+                raise KeyboardInterrupt
+            if ch == b'\r':  # 回车
                 break
-            elif ch == b'\x08':
+            elif ch == b'\x08':  # 退格
                 if line:
                     line.pop()
             else:
@@ -373,7 +377,6 @@ def main():
     try:
         fetch_and_process()
         while True:
-            # 检查用户输入的命令（仅 Windows）
             if WINDOWS:
                 cmd = check_user_command()
                 if cmd == 'test':
