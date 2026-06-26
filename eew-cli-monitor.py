@@ -77,20 +77,12 @@ SOURCE_NAMES = {
     'fj': '福建地震局',
     'cq': '重庆地震局'
 }
-
-# 启用哪些数据源（这里保留，但 all_eew 会全部推送，可根据需要过滤）
-FILTER_CONFIG = {
-    'jma': True,
-    'cenc': True,
-    'sc': True,
-    'fj': True,
-    'cq': True
+# 只对这两个数据源尝试 WebSocket
+WS_SOURCES = ['jma', 'cenc']
+WS_URLS = {
+    'jma': 'wss://ws-api.wolfx.jp/jma_eew',
+    'cenc': 'wss://ws-api.wolfx.jp/cenc_eew'
 }
-
-# 融合 WebSocket 地址
-WS_URL = 'wss://ws-api.wolfx.jp/all_eew'
-
-# HTTP 地址（仅用于启动快照）
 HTTP_URLS = {
     'jma': 'https://api.wolfx.jp/jma_eew.json',
     'cenc': 'https://api.wolfx.jp/cenc_eew.json',
@@ -98,12 +90,24 @@ HTTP_URLS = {
     'fj': 'https://api.wolfx.jp/fj_eew.json',
     'cq': 'https://api.wolfx.jp/cq_eew.json'
 }
+FILTER_CONFIG = {
+    'jma': True,
+    'cenc': True,
+    'sc': True,
+    'fj': True,
+    'cq': True
+}
+# HTTP 轮询间隔（秒），用于非 WebSocket 数据源（四川、福建、重庆）
+HTTP_POLL_INTERVAL = 600   # 10 分钟
 # ============================================
 
 processed_events = set()
 high_intensity_state = {}
 console = Console()
 ws_running = True
+
+# 状态管理：每个数据源的 WebSocket 模式（'trying', 'connected', 'fallback'）
+ws_status = {key: 'trying' for key in FILTER_CONFIG}
 
 def print_earthquake_table(title, rows):
     table = Table(title=title, box=box.ROUNDED, border_style="bold yellow")
@@ -291,72 +295,97 @@ def process_cq_eew(data):
     ]
     print_earthquake_table("地震预警速报 (重庆市地震局 CQ)", rows)
 
-# ---------- 启动快照（HTTP 获取最新历史） ----------
+# ---------- HTTP 轮询函数 ----------
+def http_fetch_once(source_key):
+    url = HTTP_URLS.get(source_key)
+    if not url:
+        return
+    try:
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            if data and isinstance(data, dict) and ('EventID' in data or 'event_id' in data):
+                process_eew(data, source_key)
+    except Exception:
+        pass
+
 def fetch_initial_snapshots():
+    """启动时获取所有数据源的最新一条历史报告"""
     for source_key, enabled in FILTER_CONFIG.items():
         if not enabled:
             continue
-        url = HTTP_URLS.get(source_key)
-        if not url:
-            continue
+        http_fetch_once(source_key)
+
+def http_polling_loop(source_key):
+    """HTTP 轮询循环（用于非 WebSocket 数据源），每 HTTP_POLL_INTERVAL 秒一次"""
+    while ws_running and ws_status.get(source_key, 'fallback') == 'fallback':
+        http_fetch_once(source_key)
+        time.sleep(HTTP_POLL_INTERVAL)
+
+# ---------- WebSocket 处理（独立连接，仅用于 WS_SOURCES） ----------
+def on_message_factory(source_key):
+    def on_message(ws, message):
         try:
-            response = requests.get(url, timeout=5)
-            if response.status_code == 200:
-                data = response.json()
-                if data and isinstance(data, dict) and ('EventID' in data or 'event_id' in data):
-                    process_eew(data, source_key)
-        except Exception:
+            data = json.loads(message)
+            if data and isinstance(data, dict) and ('EventID' in data or 'event_id' in data):
+                process_eew(data, source_key)
+        except json.JSONDecodeError:
             pass
+    return on_message
 
-# ---------- WebSocket 处理（融合 all_eew） ----------
-def on_message(ws, message):
-    try:
-        data = json.loads(message)
-        if not isinstance(data, dict):
+def on_error_factory(source_key):
+    def on_error(ws, error):
+        console.print(f"[red]{source_key} WebSocket 错误: {error}[/red]")
+        if '503' in str(error) and ws_status[source_key] != 'fallback':
+            console.print(f"[yellow]{source_key} WebSocket 服务不可用，切换到 HTTP 轮询模式[/yellow]")
+            ws_status[source_key] = 'fallback'
+            threading.Thread(target=http_polling_loop, args=(source_key,), daemon=True).start()
+    return on_error
+
+def on_close_factory(source_key):
+    def on_close(ws, close_status_code, close_msg):
+        if ws_status[source_key] == 'fallback':
+            console.print(f"[dim]{source_key} 已切换至 HTTP 轮询，不再尝试 WebSocket 重连[/dim]")
             return
-        # 根据 'type' 字段识别数据来源（Wolfx 文档中 all_eew 推送的每条数据都包含 type）
-        source_key = data.get('type')
-        if not source_key:
-            return
-        # 检查是否启用该数据源
-        if not FILTER_CONFIG.get(source_key, False):
-            return
-        if 'EventID' in data or 'event_id' in data:
-            process_eew(data, source_key)
-    except json.JSONDecodeError:
-        pass
+        if ws_running and ws_status[source_key] in ('trying', 'connected'):
+            console.print(f"[yellow]{source_key} WebSocket 连接已关闭，5秒后重连...[/yellow]")
+            time.sleep(5)
+            start_websocket(source_key)
+    return on_close
 
-def on_error(ws, error):
-    console.print(f"[red]WebSocket 错误: {error}[/red]")
+def on_open_factory(source_key):
+    def on_open(ws):
+        console.print(f"[green]{source_key} WebSocket 已连接，实时接收速报...[/green]")
+        ws_status[source_key] = 'connected'
+    return on_open
 
-def on_close(ws, close_status_code, close_msg):
-    console.print("[yellow]连接已关闭，5秒后重连...[/yellow]")
-    if ws_running:
-        time.sleep(5)
-        start_websocket()
-
-def on_open(ws):
-    console.print("[green]融合 WebSocket 已连接，实时接收所有数据源...[/green]")
-
-def start_websocket():
+def start_websocket(source_key):
     if not WS_AVAILABLE:
-        console.print("[red]websocket-client 未安装，无法启动 WebSocket[/red]")
+        console.print(f"[red]websocket-client 未安装，无法启动 {source_key} WebSocket[/red]")
+        ws_status[source_key] = 'fallback'
+        threading.Thread(target=http_polling_loop, args=(source_key,), daemon=True).start()
+        return
+    if ws_status[source_key] == 'fallback':
+        return
+    url = WS_URLS.get(source_key)
+    if not url:
         return
     try:
         websocket.enableTrace(False)
         ws = websocket.WebSocketApp(
-            WS_URL,
-            on_open=on_open,
-            on_message=on_message,
-            on_error=on_error,
-            on_close=on_close
+            url,
+            on_open=on_open_factory(source_key),
+            on_message=on_message_factory(source_key),
+            on_error=on_error_factory(source_key),
+            on_close=on_close_factory(source_key)
         )
         ws.run_forever()
     except Exception as e:
-        console.print(f"[red]WebSocket 启动失败: {e}[/red]")
-        if ws_running:
-            time.sleep(5)
-            start_websocket()
+        console.print(f"[red]{source_key} WebSocket 启动失败: {e}[/red]")
+        if ws_running and ws_status[source_key] != 'fallback':
+            ws_status[source_key] = 'fallback'
+            console.print(f"[yellow]{source_key} 切换到 HTTP 轮询模式[/yellow]")
+            threading.Thread(target=http_polling_loop, args=(source_key,), daemon=True).start()
 
 # ---------- 实验功能 ----------
 def generate_mock_jma_event(serial=1, is_final=False, event_id="MOCK001", intensity=None):
@@ -439,9 +468,27 @@ def check_user_command():
             else:
                 if 32 <= ch[0] <= 126:
                     line.append(ch.decode('ascii'))
-        cmd = ''.join(line).strip().lower()
-        return cmd
+        raw = ''.join(line).strip()
+        if not raw:
+            return None
+        return raw.lower()
     return None
+
+def check_ws_status(source_key):
+    """显示指定数据源的 WebSocket 连接状态"""
+    if source_key not in FILTER_CONFIG or not FILTER_CONFIG[source_key]:
+        console.print(f"[yellow]未启用或不存在的数据源: {source_key}[/yellow]")
+        return
+    if source_key in WS_SOURCES:
+        status = ws_status.get(source_key, 'unknown')
+        status_text = {
+            'trying': '[yellow]连接中...[/yellow]',
+            'connected': '[green]已连接[/green]',
+            'fallback': '[red]已回退至 HTTP 轮询[/red]'
+        }.get(status, f'[yellow]未知状态: {status}[/yellow]')
+        console.print(f"{SOURCE_NAMES[source_key]} WebSocket 状态: {status_text}")
+    else:
+        console.print(f"[dim]{SOURCE_NAMES[source_key]} 使用 HTTP 轮询，无 WebSocket 连接[/dim]")
 
 # ================== 主程序 ==================
 def main():
@@ -461,21 +508,41 @@ def main():
     console.print(f"[green]已启用数据源:[/green] {', '.join([SOURCE_NAMES.get(s, s) for s in active_sources])}")
     console.print("[cyan]按 Ctrl+C 可退出程序。[/cyan]\n")
 
-    # 启动快照（获取各数据源最新历史）
+    # 启动快照
     fetch_initial_snapshots()
 
-    # 启动融合 WebSocket
-    ws_running = True
-    ws_thread = threading.Thread(target=start_websocket, daemon=True)
-    ws_thread.start()
+    # 启动 JMA 和 CENC 的 WebSocket 连接（间隔 2~3 秒，不显示提示）
+    startup_order = ['jma', 'cenc']
+    for source_key in startup_order:
+        if not FILTER_CONFIG.get(source_key, False):
+            continue
+        ws_status[source_key] = 'trying'
+        thread = threading.Thread(target=start_websocket, args=(source_key,), daemon=True)
+        thread.start()
+        delay = random.uniform(2.0, 3.0)
+        time.sleep(delay)
 
-    # 主循环处理命令
+    # 对于非 WebSocket 数据源（sc, fj, cq），直接标记为 fallback 并启动轮询（不显示提示）
+    for source_key in ['sc', 'fj', 'cq']:
+        if not FILTER_CONFIG.get(source_key, False):
+            continue
+        ws_status[source_key] = 'fallback'
+        threading.Thread(target=http_polling_loop, args=(source_key,), daemon=True).start()
+
+    # 主循环
     try:
         while True:
             if WINDOWS:
-                cmd = check_user_command()
-                if cmd == 'test':
-                    run_mock_test()
+                raw_cmd = check_user_command()
+                if raw_cmd:
+                    parts = raw_cmd.split()
+                    if parts[0] == 'test':
+                        if len(parts) == 1:
+                            run_mock_test()
+                        elif len(parts) == 2:
+                            check_ws_status(parts[1])
+                        else:
+                            console.print("[yellow]用法: test [数据源] 或 test 无参数执行模拟[/yellow]")
             time.sleep(0.1)
     except KeyboardInterrupt:
         ws_running = False
