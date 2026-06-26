@@ -4,6 +4,8 @@ import sys
 import os
 import winsound
 import random
+import json
+import threading
 from datetime import datetime
 from rich.console import Console
 from rich.table import Table
@@ -14,6 +16,13 @@ try:
     WINDOWS = True
 except ImportError:
     WINDOWS = False
+
+try:
+    import websocket
+    WS_AVAILABLE = True
+except ImportError:
+    WS_AVAILABLE = False
+    print("[警告] websocket-client 未安装，请运行 pip install websocket-client")
 
 # ================== 资源路径（兼容 PyInstaller） ==================
 def resource_path(relative_path):
@@ -68,6 +77,8 @@ SOURCE_NAMES = {
     'fj': '福建地震局',
     'cq': '重庆地震局'
 }
+
+# 启用哪些数据源（这里保留，但 all_eew 会全部推送，可根据需要过滤）
 FILTER_CONFIG = {
     'jma': True,
     'cenc': True,
@@ -75,11 +86,24 @@ FILTER_CONFIG = {
     'fj': True,
     'cq': True
 }
+
+# 融合 WebSocket 地址
+WS_URL = 'wss://ws-api.wolfx.jp/all_eew'
+
+# HTTP 地址（仅用于启动快照）
+HTTP_URLS = {
+    'jma': 'https://api.wolfx.jp/jma_eew.json',
+    'cenc': 'https://api.wolfx.jp/cenc_eew.json',
+    'sc': 'https://api.wolfx.jp/sc_eew.json',
+    'fj': 'https://api.wolfx.jp/fj_eew.json',
+    'cq': 'https://api.wolfx.jp/cq_eew.json'
+}
 # ============================================
 
 processed_events = set()
 high_intensity_state = {}
 console = Console()
+ws_running = True
 
 def print_earthquake_table(title, rows):
     table = Table(title=title, box=box.ROUNDED, border_style="bold yellow")
@@ -90,6 +114,19 @@ def print_earthquake_table(title, rows):
     for data_row in rows[1:]:
         table.add_row(str(data_row[0]), str(data_row[1]))
     console.print(table)
+
+# ---------- 处理各种数据源 ----------
+def process_eew(data, source_key):
+    if source_key == 'jma':
+        process_jma_eew(data)
+    elif source_key == 'cenc':
+        process_cenc_eew(data)
+    elif source_key == 'sc':
+        process_sc_eew(data)
+    elif source_key == 'fj':
+        process_fj_eew(data)
+    elif source_key == 'cq':
+        process_cq_eew(data)
 
 def process_jma_eew(data):
     global nhk_block_until
@@ -117,6 +154,16 @@ def process_jma_eew(data):
     lat = data.get('Latitude')
     lon = data.get('Longitude')
     coords = f"{lat}, {lon}" if lat and lon else '未知'
+    acc_epicenter = data.get('Accuracy', {}).get('Epicenter', 'N/A')
+    acc_depth = data.get('Accuracy', {}).get('Depth', 'N/A')
+    acc_magnitude = data.get('Accuracy', {}).get('Magnitude', 'N/A')
+    max_int_change = data.get('MaxIntChange', {}).get('String', None)
+    warn_areas = data.get('WarnArea', [])
+    first_area_info = "无具体区域"
+    if warn_areas:
+        first = warn_areas[0]
+        first_area_info = f"{first.get('Chiiki')} 震度 {first.get('Shindo1', 'N/A')}"
+
     rows = [
         ["项目", "信息"],
         ["发震时刻", origin_time],
@@ -127,6 +174,11 @@ def process_jma_eew(data):
         ["最大震度(日本)", max_intensity],
         ["速报序号", str(serial)],
         ["最终报", "是" if is_final else "否"],
+        ["震央精度", acc_epicenter],
+        ["深度精度", acc_depth],
+        ["震级精度", acc_magnitude],
+        ["震度变化", max_int_change if max_int_change else "无"],
+        ["警报区域示例", first_area_info],
         ["数据来源", SOURCE_NAMES['jma']]
     ]
     print_earthquake_table("地震预警速报 (日本气象厅 JMA)", rows)
@@ -239,42 +291,74 @@ def process_cq_eew(data):
     ]
     print_earthquake_table("地震预警速报 (重庆市地震局 CQ)", rows)
 
-def process_eew(data, source_key):
-    if source_key == 'jma':
-        process_jma_eew(data)
-    elif source_key == 'cenc':
-        process_cenc_eew(data)
-    elif source_key == 'sc':
-        process_sc_eew(data)
-    elif source_key == 'fj':
-        process_fj_eew(data)
-    elif source_key == 'cq':
-        process_cq_eew(data)
-
-def fetch_and_process():
-    urls = []
-    if FILTER_CONFIG.get('jma'):
-        urls.append(('jma_eew', 'https://api.wolfx.jp/jma_eew.json'))
-    if FILTER_CONFIG.get('cenc'):
-        urls.append(('cenc_eew', 'https://api.wolfx.jp/cenc_eew.json'))
-    if FILTER_CONFIG.get('sc'):
-        urls.append(('sc_eew', 'https://api.wolfx.jp/sc_eew.json'))
-    if FILTER_CONFIG.get('fj'):
-        urls.append(('fj_eew', 'https://api.wolfx.jp/fj_eew.json'))
-    if FILTER_CONFIG.get('cq'):
-        urls.append(('cq_eew', 'https://api.wolfx.jp/cq_eew.json'))
-
-    for source_key, url in urls:
+# ---------- 启动快照（HTTP 获取最新历史） ----------
+def fetch_initial_snapshots():
+    for source_key, enabled in FILTER_CONFIG.items():
+        if not enabled:
+            continue
+        url = HTTP_URLS.get(source_key)
+        if not url:
+            continue
         try:
             response = requests.get(url, timeout=5)
             if response.status_code == 200:
                 data = response.json()
-                if '_eew' in source_key:
-                    process_eew(data, source_key.replace('_eew', ''))
+                if data and isinstance(data, dict) and ('EventID' in data or 'event_id' in data):
+                    process_eew(data, source_key)
         except Exception:
             pass
 
-# ---------- 实验功能：模拟测试 ----------
+# ---------- WebSocket 处理（融合 all_eew） ----------
+def on_message(ws, message):
+    try:
+        data = json.loads(message)
+        if not isinstance(data, dict):
+            return
+        # 根据 'type' 字段识别数据来源（Wolfx 文档中 all_eew 推送的每条数据都包含 type）
+        source_key = data.get('type')
+        if not source_key:
+            return
+        # 检查是否启用该数据源
+        if not FILTER_CONFIG.get(source_key, False):
+            return
+        if 'EventID' in data or 'event_id' in data:
+            process_eew(data, source_key)
+    except json.JSONDecodeError:
+        pass
+
+def on_error(ws, error):
+    console.print(f"[red]WebSocket 错误: {error}[/red]")
+
+def on_close(ws, close_status_code, close_msg):
+    console.print("[yellow]连接已关闭，5秒后重连...[/yellow]")
+    if ws_running:
+        time.sleep(5)
+        start_websocket()
+
+def on_open(ws):
+    console.print("[green]融合 WebSocket 已连接，实时接收所有数据源...[/green]")
+
+def start_websocket():
+    if not WS_AVAILABLE:
+        console.print("[red]websocket-client 未安装，无法启动 WebSocket[/red]")
+        return
+    try:
+        websocket.enableTrace(False)
+        ws = websocket.WebSocketApp(
+            WS_URL,
+            on_open=on_open,
+            on_message=on_message,
+            on_error=on_error,
+            on_close=on_close
+        )
+        ws.run_forever()
+    except Exception as e:
+        console.print(f"[red]WebSocket 启动失败: {e}[/red]")
+        if ws_running:
+            time.sleep(5)
+            start_websocket()
+
+# ---------- 实验功能 ----------
 def generate_mock_jma_event(serial=1, is_final=False, event_id="MOCK001", intensity=None):
     base_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     mock_mag = 4.5 + (serial * 0.1)
@@ -339,19 +423,17 @@ def run_mock_test():
     console.print("[yellow]退出模拟模式。[/yellow]")
 
 def check_user_command():
-    """检测用户输入的命令，支持 test 命令。若检测到 Ctrl+C，主动抛出 KeyboardInterrupt"""
     if not WINDOWS:
         return None
     if msvcrt.kbhit():
         line = []
         while True:
             ch = msvcrt.getch()
-            # 检测 Ctrl+C (ASCII 3)
             if ch == b'\x03':
                 raise KeyboardInterrupt
-            if ch == b'\r':  # 回车
+            if ch == b'\r':
                 break
-            elif ch == b'\x08':  # 退格
+            elif ch == b'\x08':
                 if line:
                     line.pop()
             else:
@@ -363,7 +445,13 @@ def check_user_command():
 
 # ================== 主程序 ==================
 def main():
-    console.print("\n[bold yellow]========== Wolfx 地震预警命令行监控程序 v1.4 ==========[/bold yellow]")
+    global ws_running
+
+    if not WS_AVAILABLE:
+        console.print("[red]错误: websocket-client 未安装，请运行 pip install websocket-client[/red]")
+        sys.exit(1)
+
+    console.print("\n[bold yellow]========== Wolfx 地震预警命令行监控程序 v1.5 ==========[/bold yellow]")
     if not os.path.exists(SOUND_ALERT):
         console.print("[yellow]提示: 普通提示音文件未找到，将无法播放。[/yellow]")
     if not os.path.exists(SOUND_NHK):
@@ -371,19 +459,26 @@ def main():
 
     active_sources = [src for src, active in FILTER_CONFIG.items() if active]
     console.print(f"[green]已启用数据源:[/green] {', '.join([SOURCE_NAMES.get(s, s) for s in active_sources])}")
-    console.print("[cyan]收到新地震时会弹出表格并播放提示音。紧急铃声播放期间普通提示音会被屏蔽。[/cyan]")
     console.print("[cyan]按 Ctrl+C 可退出程序。[/cyan]\n")
 
+    # 启动快照（获取各数据源最新历史）
+    fetch_initial_snapshots()
+
+    # 启动融合 WebSocket
+    ws_running = True
+    ws_thread = threading.Thread(target=start_websocket, daemon=True)
+    ws_thread.start()
+
+    # 主循环处理命令
     try:
-        fetch_and_process()
         while True:
             if WINDOWS:
                 cmd = check_user_command()
                 if cmd == 'test':
                     run_mock_test()
-            fetch_and_process()
-            time.sleep(1)
+            time.sleep(0.1)
     except KeyboardInterrupt:
+        ws_running = False
         console.print("\n[bold red]程序已退出，感谢使用！[/bold red]")
         sys.exit(0)
 
