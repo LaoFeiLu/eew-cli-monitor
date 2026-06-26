@@ -43,9 +43,15 @@
 - 在py文件目录下
 - requests>=2.25.0
 - rich>=10.0.0
+- websocket-client>=1.6.0
 ```cmd
-pip install requests rich
+pip install requests rich websocket-client
 ```
+或
+```cmd
+pip install -r requirements.txt
+```
+
 3. 运行程序
 ```cmd
 python eew-cli-monitor.py
