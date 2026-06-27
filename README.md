@@ -1,14 +1,19 @@
 # eew-cli-monitor
 # 地震预警命令行监控程序
 
-基于 Wolfx 公益 API 的地震预警命令行工具。程序会每秒轮询一次地震速报数据，当检测到新地震时，会在终端中以彩色表格形式显示详细预警信息（震中、震级、深度、坐标、最大震度/烈度、精度信息等）。
+基于 Wolfx 与 P2PQuake 公益 API 的地震预警命令行工具。程序会每秒轮询一次地震速报数据，当检测到新地震时，会在终端中以彩色表格形式显示详细预警信息（震中、震级、深度、坐标、最大震度/烈度、精度信息等）。
 
-支持数据源：
+## 支持数据源：
+
+1.wolfx 
 - 日本气象厅 (JMA)
 - 中国地震台网中心 (CENC)
 - 四川地震局 (SC)
 - 福建地震局 (FJ)
 - 重庆地震局 (CQ)
+
+2.P2PQuake
+- 日本气象厅 (JMA)
 
 ![地震预警效果图](./image/image1.png)
 
@@ -80,7 +85,7 @@ pyinstaller --onefile --console --add-data "sounds/alert.wav;sounds" --add-data 
   
 ### 致谢
 
-- 本程序使用的所有地震预警数据均由 [Wolfx Project](https://wolfx.jp/) 公益提供，感谢他们的无私贡献。
+- 本程序使用的所有地震预警数据均由 [Wolfx Project](https://wolfx.jp/) 与 [P2PQuake](https://www.p2pquake.net/) 提供，感谢他们的无私贡献。
 - 感谢 [DeepSeek](https://deepseek.com/) 人工智能助手协助编写、优化和调试本程序代码。
   
 ### 许可证
