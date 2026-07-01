@@ -6,6 +6,7 @@ import winsound
 import random
 import json
 import threading
+import socket
 from datetime import datetime
 from rich.console import Console
 from rich.table import Table
@@ -18,13 +19,17 @@ try:
 except ImportError:
     WINDOWS = False
 
+# 调试模式开关（默认关闭）
+DEBUG = False
+
+# Wolfx 需要 websocket-client
 try:
     import websocket
 
     WS_AVAILABLE = True
 except ImportError:
     WS_AVAILABLE = False
-    print("[警告] websocket-client 未安装，请运行 pip install websocket-client")
+    print("[警告] websocket-client 未安装，Wolfx 将无法连接")
 
 
 # ================== 资源路径 ==================
@@ -78,26 +83,26 @@ def is_high_intensity(intensity_str):
 
 # ================== 数据源配置 ==================
 SOURCE_CONFIG = {
-    'p2p': {
-        'name': 'P2PQuake',
-        'url': 'wss://api.p2pquake.net/v2/ws',
-        'enabled': True,
-        'type': 'jma_only'
-    },
     'wolfx': {
         'name': 'Wolfx',
         'url': 'wss://ws-api.wolfx.jp/all_eew',
         'enabled': True,
-        'type': 'all'
+        'type': 'all',
+        'need_subscribe': False,
+        'fallback_urls': []
+    },
+    'p2p': {
+        'name': 'P2PQuake (EPSP)',
+        'enabled': True,
+        'type': 'jma_only'
     }
 }
 
 SOURCE_DISPLAY = {
-    'p2p': 'P2PQuake',
-    'wolfx': 'Wolfx'
+    'wolfx': 'Wolfx',
+    'p2p': 'P2PQuake (EPSP)'
 }
 
-# HTTP 快照地址
 HTTP_URLS = {
     'jma': 'https://api.wolfx.jp/jma_eew.json',
     'cenc': 'https://api.wolfx.jp/cenc_eew.json',
@@ -143,7 +148,7 @@ def process_eew(data, source_key, default_type=None):
         data_type = default_type
     if not data_type:
         return
-    if not FILTER_CONFIG.get(data_type, False):
+    if not FILTER_CONFIG.get(data_type, True):
         return
     if data_type == 'jma':
         process_jma_eew(data, source_key)
@@ -325,7 +330,6 @@ def process_cq_eew(data, source_key):
 def fetch_initial_snapshots():
     console.print("[dim]正在获取启动快照...[/dim]")
 
-    # ---- Wolfx 快照 ----
     for source_key, enabled in FILTER_CONFIG.items():
         if not enabled:
             continue
@@ -341,7 +345,6 @@ def fetch_initial_snapshots():
         except Exception:
             pass
 
-    # ---- P2PQuake 快照 ----
     try:
         p2p_url = "https://api.p2pquake.net/v2/history?codes=551&limit=1"
         response = requests.get(p2p_url, timeout=5)
@@ -389,7 +392,347 @@ def scale_to_jma(scale_code):
     return scale_map.get(scale_code, "不明")
 
 
-# ---------- WebSocket 处理 ----------
+# ---------- EPSP 协议实现（P2PQuake） ----------
+class EPSPClient:
+    def __init__(self):
+        self.servers = ['www.p2pquake.net', 'p2pquake.info', 'p2pquake.xyz', 'p2pquake.ddo.jp']
+        self.port = 6910
+        self.running = True
+        self.sock = None
+        self.peer_id = None
+        self.region_code = 901
+        self.connected_peers = {}
+        self.lock = threading.Lock()
+        self.server_index = 0
+        self.recv_buffer = ""
+        self.listener = None
+        self.listener_thread = None
+
+    def start(self):
+        self._start_listener()
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _start_listener(self):
+        try:
+            self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.listener.bind(('0.0.0.0', 6911))
+            self.listener.listen(5)
+            self.listener_thread = threading.Thread(target=self._listener_loop, daemon=True)
+            self.listener_thread.start()
+            if DEBUG:
+                console.print("[dim]端口 6911 监听已启动[/dim]")
+        except Exception as e:
+            if DEBUG:
+                console.print(f"[red]无法启动端口监听 (6911): {e}[/red]")
+
+    def _listener_loop(self):
+        while self.running:
+            try:
+                client, addr = self.listener.accept()
+                client.close()
+                if DEBUG:
+                    console.print(f"[dim]收到连接检查请求，已关闭[/dim]")
+            except Exception:
+                break
+
+    def _run(self):
+        while self.running:
+            host = self.servers[self.server_index % len(self.servers)]
+            if DEBUG:
+                console.print(f"[dim]尝试连接 P2PQuake (EPSP) 服务器: {host}:{self.port}[/dim]")
+            try:
+                self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.sock.settimeout(10)
+                self.sock.connect((host, self.port))
+                if DEBUG:
+                    console.print(f"[dim]已连接到 {host}:{self.port}[/dim]")
+                self._send("131 1 0.32:EEW_CLI:1.6")
+                if DEBUG:
+                    console.print("[dim]发送协议版本: 131 1 0.32:EEW_CLI:1.6[/dim]")
+                self._receive_loop()
+                break
+            except socket.timeout:
+                if DEBUG:
+                    console.print(f"[red]连接 {host} 超时[/red]")
+                self.server_index += 1
+                time.sleep(3)
+            except Exception as e:
+                if DEBUG:
+                    console.print(f"[red]连接 {host} 失败: {e}[/red]")
+                self.server_index += 1
+                time.sleep(3)
+        if not self.running:
+            console.print("[red]P2PQuake (EPSP) 连接失败，已放弃[/red]")
+
+    def _send(self, msg):
+        if self.sock:
+            try:
+                full_msg = msg + "\r\n"
+                self.sock.send(full_msg.encode('shift-jis'))
+                if DEBUG:
+                    console.print(f"[dim]发送: {msg}[/dim]")
+            except Exception as e:
+                console.print(f"[red]发送失败: {e}[/red]")
+
+    def _receive_loop(self):
+        while self.running:
+            try:
+                data = self.sock.recv(4096)
+                if not data:
+                    if DEBUG:
+                        console.print("[yellow]服务器关闭连接[/yellow]")
+                    break
+                self.recv_buffer += data.decode('shift-jis', errors='ignore')
+                if DEBUG:
+                    console.print(f"[dim]原始数据: {data[:200]}[/dim]")
+                while '\r\n' in self.recv_buffer:
+                    line, self.recv_buffer = self.recv_buffer.split('\r\n', 1)
+                    if line.strip():
+                        if DEBUG:
+                            console.print(f"[dim]收到: {line}[/dim]")
+                        self._handle_line(line)
+            except socket.timeout:
+                continue
+            except Exception as e:
+                console.print(f"[red]接收错误: {e}[/red]")
+                break
+        if self.running:
+            console.print("[yellow]P2PQuake (EPSP) 连接已关闭，5秒后重连...[/yellow]")
+            self.server_index += 1
+            time.sleep(5)
+            self._run()
+
+    def _handle_line(self, line):
+        try:
+            parts = line.split(' ', 2)
+            if len(parts) < 3:
+                if DEBUG:
+                    console.print(f"[dim]忽略格式错误行: {line}[/dim]")
+                return
+            code = parts[0]
+            hop = parts[1]
+            data = parts[2] if len(parts) > 2 else ''
+            if DEBUG:
+                console.print(f"[dim]处理代码 {code}, 数据: {data[:50]}[/dim]")
+
+            if code == '212':
+                if DEBUG:
+                    console.print(f"[dim]服务器版本: {data}[/dim]")
+                self._send("113 1")
+            elif code == '233':
+                self.peer_id = data
+                if DEBUG:
+                    console.print(f"[dim]临时ID: {self.peer_id}[/dim]")
+                self._send(f"115 1 {self.peer_id}")
+            elif code == '235':
+                if DEBUG:
+                    console.print(f"[dim]收到节点列表，长度: {len(data)}[/dim]")
+                self._connect_to_peers(data)
+                self._send(f"116 1 {self.peer_id}:6911:{self.region_code}:0:5")
+            elif code == '236':
+                console.print(f"[green]P2PQuake (EPSP) 已连接[/green]")
+                ws_status['p2p'] = 'connected'
+                # 启用心跳测试（发送 123）
+                # threading.Timer(5, self._start_echo).start()
+            elif code == '551':
+                self._handle_earthquake_data(data)
+            elif code == '552':
+                self._handle_tsunami_data(data)
+            elif code == '555':
+                self._handle_sensor_data(data)
+            elif code == '561':
+                self._handle_peer_count_data(data)
+            elif code == '299':
+                console.print("[red]P2PQuake (EPSP) IP 变化，重新连接[/red]")
+                self.sock.close()
+                self.server_index += 1
+                self._run()
+                return
+            elif code == '298':
+                if DEBUG:
+                    console.print("[dim]收到协议警告 (298)，忽略[/dim]")
+            else:
+                if DEBUG:
+                    console.print(f"[dim]忽略代码 {code}[/dim]")
+        except Exception as e:
+            console.print(f"[red]处理消息错误: {e}[/red]")
+
+    def _start_echo(self):
+        """启动 echo 循环（由 Timer 调用）"""
+        threading.Thread(target=self._echo_loop, daemon=True).start()
+
+    def _echo_loop(self):
+        """定时发送 123 心跳消息"""
+        while self.running:
+            try:
+                # 格式: 123 1 {peer_id}:1
+                self._send(f"123 1 {self.peer_id}:1")
+                time.sleep(600)  # 10 分钟
+            except Exception as e:
+                if DEBUG:
+                    console.print(f"[red]Echo 循环错误: {e}[/red]")
+                break
+
+    def _connect_to_peers(self, peer_data):
+        peers = peer_data.split(':')
+        for peer_info in peers[:3]:
+            try:
+                parts = peer_info.split(',')
+                if len(parts) >= 3:
+                    ip = parts[0]
+                    port = int(parts[1])
+                    pid = parts[2]
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(3)
+                    sock.connect((ip, port))
+                    sock.send(b"614 1 0.32:EEW_CLI:1.6\r\n")
+                    response = sock.recv(1024).decode('shift-jis', errors='ignore')
+                    if response.startswith('634'):
+                        sock.send(b"612 1\r\n")
+                        id_response = sock.recv(1024).decode('shift-jis', errors='ignore')
+                        if id_response.startswith('632'):
+                            their_id = id_response.split(' ', 2)[2].strip()
+                            with self.lock:
+                                self.connected_peers[their_id] = sock
+                        else:
+                            sock.close()
+                    else:
+                        sock.close()
+            except:
+                pass
+
+    def _handle_earthquake_data(self, data):
+        try:
+            parts = data.split(':', 3)
+            if len(parts) < 4:
+                return
+            signature, expiry, summary, detail = parts
+            summary_parts = summary.split(',')
+            if len(summary_parts) < 11:
+                return
+            origin_time = summary_parts[0]
+            intensity = summary_parts[1]
+            tsunami = summary_parts[2]
+            info_type = summary_parts[3]
+            source = summary_parts[4]
+            depth = summary_parts[5]
+            mag = summary_parts[6]
+            correction = summary_parts[7]
+            lat_dir = summary_parts[8]
+            lat_val = summary_parts[9] if len(summary_parts) > 9 else ''
+            lon_dir = summary_parts[10] if len(summary_parts) > 10 else ''
+            lon_val = summary_parts[11] if len(summary_parts) > 11 else ''
+
+            earthquake_data = {
+                "type": "jma",
+                "EventID": f"P2P_{int(time.time())}",
+                "OriginTime": origin_time.replace('頃', ''),
+                "Hypocenter": source,
+                "Magunitude": mag,
+                "Depth": depth,
+                "MaxIntensity": intensity,
+                "isFinal": True,
+                "Latitude": self._parse_latlon(lat_dir, lat_val),
+                "Longitude": self._parse_latlon(lon_dir, lon_val)
+            }
+            process_eew(earthquake_data, 'p2p')
+        except Exception as e:
+            console.print(f"[red]解析地震数据失败: {e}[/red]")
+
+    def _handle_tsunami_data(self, data):
+        """处理海啸预警（552）"""
+        try:
+            parts = data.split(':', 2)
+            if len(parts) < 3:
+                return
+            signature, expiry, detail = parts
+            items = detail.split(',')
+            rows = [["項目", "情報"]]
+            rows.append(["種別", "海嘯預警"])
+            for item in items:
+                if item.startswith('-'):
+                    rows.append(["予報種類", item[1:]])
+                elif item.startswith('+') or item.startswith('*'):
+                    rows.append(["予報区", item[1:]])
+                elif item == "解除":
+                    rows.append(["解除", "津波注意報等が解除されました"])
+            # 显示表格
+            table = Table(title="海嘯預警 (P2PQuake)", box=box.ROUNDED, border_style="bold red")
+            table.add_column("項目", style="cyan", no_wrap=True, width=12)
+            table.add_column("情報", style="white", no_wrap=False, width=48)
+            for row in rows[1:]:
+                table.add_row(row[0], row[1])
+            console.print(table)
+            # 播放音频
+            play_sound(SOUND_ALERT, is_nhk=False)
+        except Exception as e:
+            console.print(f"[red]解析海嘯數據失敗: {e}[/red]")
+
+    def _handle_sensor_data(self, data):
+        """处理地震感知情報（555）"""
+        try:
+            parts = data.split(':', 5)
+            if len(parts) < 6:
+                return
+            sensor_info = parts[5]
+            console.print(f"[dim]收到地震感知情報: {sensor_info}[/dim]")
+        except Exception as e:
+            console.print(f"[red]解析感知情報失敗: {e}[/red]")
+
+    def _handle_peer_count_data(self, data):
+        """处理各地域ピア数（561），提取紧急地震速报"""
+        try:
+            parts = data.split(':', 2)
+            if len(parts) < 3:
+                return
+            signature, expiry, peer_data = parts
+            items = peer_data.split(';')
+            eew_found = False
+            for item in items:
+                if ',' in item:
+                    code, count = item.split(',')
+                    if code == '950':
+                        console.print("[bold red]緊急地震速報（警報）が発表されました！[/bold red]")
+                        play_sound(SOUND_NHK, is_nhk=True)
+                        eew_found = True
+                    elif code == '951':
+                        console.print("[bold yellow]緊急地震速報（配信試験）[/bold yellow]")
+                        eew_found = True
+                    elif code == '952':
+                        console.print("[bold red]緊急地震速報（警報）部分配信[/bold red]")
+                        play_sound(SOUND_NHK, is_nhk=True)
+                        eew_found = True
+                    elif code == '953':
+                        console.print("[bold yellow]緊急地震速報（テスト）部分配信[/bold yellow]")
+                        eew_found = True
+                    elif code == '954':
+                        console.print("[bold blue]緊急地震速報（警報）取消[/bold blue]")
+                        eew_found = True
+                    elif code == '955':
+                        console.print("[bold cyan]緊急地震速報（続報）[/bold cyan]")
+                        eew_found = True
+            if not eew_found and DEBUG:
+                console.print(f"[dim]各地域ピア数: {peer_data[:100]}[/dim]")
+        except Exception as e:
+            console.print(f"[red]解析ピア数失敗: {e}[/red]")
+
+    def _parse_latlon(self, direction, value):
+        if not value or value == '-1':
+            return None
+        try:
+            val = float(value)
+            if direction == 'N' or direction == 'E':
+                return val
+            elif direction == 'S' or direction == 'W':
+                return -val
+            else:
+                return val
+        except:
+            return None
+
+
+# ---------- Wolfx WebSocket 处理 ----------
 def on_message_factory(source_key):
     def on_message(ws, message):
         if not SOURCE_CONFIG.get(source_key, {}).get('enabled', True):
@@ -398,29 +741,8 @@ def on_message_factory(source_key):
             data = json.loads(message)
             if not isinstance(data, dict):
                 return
-            if source_key == 'p2p':
-                if data.get('type') == 'earthquake':
-                    eq_data = data.get('earthquake', {})
-                    hypocenter = eq_data.get('hypocenter', {})
-                    converted = {
-                        "type": "jma",
-                        "EventID": data.get("id", ""),
-                        "OriginTime": eq_data.get("time", ""),
-                        "Hypocenter": hypocenter.get("name", "未知地区"),
-                        "Magunitude": hypocenter.get("magnitude", -1),
-                        "Depth": hypocenter.get("depth", "N/A"),
-                        "MaxIntensity": scale_to_jma(eq_data.get("maxScale", 0)),
-                        "Latitude": hypocenter.get("latitude"),
-                        "Longitude": hypocenter.get("longitude"),
-                        "isFinal": True,
-                        "Accuracy": {},
-                        "WarnArea": []
-                    }
-                    if converted["Magunitude"] != -1:
-                        process_eew(converted, source_key)
-            else:
-                if 'EventID' in data or 'event_id' in data:
-                    process_eew(data, source_key)
+            if 'EventID' in data or 'event_id' in data:
+                process_eew(data, source_key)
         except json.JSONDecodeError:
             pass
 
@@ -479,15 +801,30 @@ def start_websocket(source_key):
 
 # ---------- 命令处理 ----------
 def handle_command(cmd):
+    global DEBUG
     parts = cmd.split()
     if not parts:
         return
     if parts[0] == 'test':
         run_mock_test()
         return
+    elif parts[0] == 'debug':
+        if len(parts) == 1:
+            DEBUG = not DEBUG
+            console.print(f"[dim]调试模式: {'开启' if DEBUG else '关闭'}[/dim]")
+        elif len(parts) == 2:
+            if parts[1] == 'on':
+                DEBUG = True
+                console.print("[dim]调试模式: 开启[/dim]")
+            elif parts[1] == 'off':
+                DEBUG = False
+                console.print("[dim]调试模式: 关闭[/dim]")
+            else:
+                console.print("[yellow]用法: debug [on|off] 或 debug (切换)[/yellow]")
+        return
     elif parts[0] == 'stop':
         if len(parts) < 2:
-            console.print("[yellow]用法: stop <p2p|wolfx>[/yellow]")
+            console.print("[yellow]用法: stop <wolfx|p2p>[/yellow]")
             return
         target = parts[1]
         if target not in SOURCE_CONFIG:
@@ -506,7 +843,7 @@ def handle_command(cmd):
         return
     elif parts[0] == 'enable':
         if len(parts) < 2:
-            console.print("[yellow]用法: enable <p2p|wolfx>[/yellow]")
+            console.print("[yellow]用法: enable <wolfx|p2p>[/yellow]")
             return
         target = parts[1]
         if target not in SOURCE_CONFIG:
@@ -517,7 +854,10 @@ def handle_command(cmd):
             return
         SOURCE_CONFIG[target]['enabled'] = True
         console.print(f"[green]{target} 已启用，正在连接...[/green]")
-        threading.Thread(target=start_websocket, args=(target,), daemon=True).start()
+        if target == 'p2p':
+            epsp_client.start()
+        else:
+            threading.Thread(target=start_websocket, args=(target,), daemon=True).start()
         return
     elif parts[0] == 'status':
         console.print("[cyan]当前数据源状态:[/cyan]")
@@ -625,8 +965,7 @@ def main():
     global ws_running
 
     if not WS_AVAILABLE:
-        console.print("[red]错误: websocket-client 未安装，请运行 pip install websocket-client[/red]")
-        sys.exit(1)
+        console.print("[red]错误: websocket-client 未安装，Wolfx 将不可用[/red]")
 
     console.print("\n[bold yellow]========== Wolfx 地震预警命令行监控程序 v1.6 ==========[/bold yellow]")
     if not os.path.exists(SOUND_ALERT):
@@ -634,21 +973,23 @@ def main():
     if not os.path.exists(SOUND_NHK):
         console.print("[yellow]提示: 紧急铃声文件未找到，将无法播放。[/yellow]")
 
-    # 不再显示命令列表，所有命令为实验性功能
-    console.print("[cyan]数据源: P2PQuake (日本) + Wolfx (日本+中国)[/cyan]")
+    console.print("[cyan]数据源: Wolfx + P2PQuake (EPSP)[/cyan]")
     console.print("[cyan]按 Ctrl+C 可退出程序。[/cyan]\n")
 
-    # 启动快照
     fetch_initial_snapshots()
 
-    # 启动所有启用的数据源
     for source_key, config in SOURCE_CONFIG.items():
-        if config['enabled']:
+        if source_key == 'wolfx' and config['enabled']:
             ws_status[source_key] = 'connecting'
             threading.Thread(target=start_websocket, args=(source_key,), daemon=True).start()
             time.sleep(1)
 
-    # 主循环
+    global epsp_client
+    epsp_client = EPSPClient()
+    if SOURCE_CONFIG['p2p']['enabled']:
+        ws_status['p2p'] = 'connecting'
+        epsp_client.start()
+
     try:
         while True:
             if WINDOWS:
@@ -658,6 +999,8 @@ def main():
             time.sleep(0.1)
     except KeyboardInterrupt:
         ws_running = False
+        if 'epsp_client' in globals():
+            epsp_client.running = False
         console.print("\n[bold red]程序已退出，感谢使用！[/bold red]")
         sys.exit(0)
 
