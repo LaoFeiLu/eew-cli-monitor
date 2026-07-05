@@ -720,7 +720,7 @@ class EPSPClient:
 
 # ---------- NIED WebSocket 处理 ----------
 def on_nied_message(ws, message):
-    """处理 NIED 服务推送的消息"""
+    """处理 NIED 服务推送的消息（支持多报）"""
     if not SOURCE_CONFIG.get('nied', {}).get('enabled', True):
         return
     try:
@@ -735,28 +735,35 @@ def on_nied_message(ws, message):
             if DEBUG:
                 console.print("[dim]NIED 心跳[/dim]")
         elif msg_type == 'update':
-            # 获取实际数据（在 data 字段内）
             inner_data = data.get('data')
             if not inner_data or not isinstance(inner_data, dict):
                 if DEBUG:
                     console.print("[dim]NIED update 无有效数据，跳过[/dim]")
                 return
-
-            # 提取关键字段
             magunitude = inner_data.get('magunitude')
             region_name = inner_data.get('region_name')
-
-            # 如果震级和区域都无效，跳过
             if (magunitude is None or magunitude == '' or magunitude == 'N/A') and \
                     (region_name is None or region_name == '' or region_name == '未知'):
                 if DEBUG:
                     console.print(f"[dim]NIED 数据缺少震级或区域: mag={magunitude}, region={region_name}[/dim]")
                 return
 
-            # 构造映射
+            report_id = inner_data.get('report_id')
+            report_num = inner_data.get('report_num', '1')
+            if report_id:
+                report_key = f"nied_{report_id}_{report_num}"
+            else:
+                report_key = f"nied_{int(time.time())}"
+
+            if report_key in processed_events:
+                if DEBUG:
+                    console.print(f"[dim]NIED 重复事件: {report_key}[/dim]")
+                return
+            processed_events.add(report_key)
+
             mapped = {
                 "type": "jma",
-                "EventID": inner_data.get('report_id') or f"NIED_{int(time.time())}",
+                "EventID": report_id or f"NIED_{int(time.time())}",
                 "OriginTime": inner_data.get('origin_time') or inner_data.get('report_time', ''),
                 "Hypocenter": region_name or '未知地区',
                 "Magunitude": magunitude if magunitude and magunitude != 'N/A' else 'N/A',
@@ -768,16 +775,9 @@ def on_nied_message(ws, message):
                 "Longitude": float(inner_data['longitude']) if inner_data.get('longitude') and inner_data[
                     'longitude'] != 'N/A' else None,
                 "Accuracy": {},
-                "WarnArea": []
+                "WarnArea": [],
+                "Serial": int(report_num) if report_num.isdigit() else 1
             }
-
-            # 去重
-            if mapped["EventID"] in processed_events:
-                if DEBUG:
-                    console.print(f"[dim]NIED 重复事件: {mapped['EventID']}[/dim]")
-                return
-            processed_events.add(mapped["EventID"])
-
             process_eew(mapped, 'nied')
         elif msg_type == 'pong':
             if DEBUG:
@@ -808,7 +808,6 @@ def on_nied_open(ws):
 
 
 def start_nied_websocket():
-    """启动 NIED WebSocket 连接"""
     if not WS_AVAILABLE:
         console.print("[red]websocket-client 未安装，无法启动 NIED[/red]")
         return
@@ -906,7 +905,63 @@ def handle_command(cmd):
     parts = cmd.split()
     if not parts:
         return
-    if parts[0] == 'test':
+
+    # 辅助函数：停用单个数据源
+    def _stop_source(target):
+        if target not in SOURCE_CONFIG:
+            console.print(f"[yellow]未知数据源: {target}[/yellow]")
+            return False
+        if not SOURCE_CONFIG[target]['enabled']:
+            console.print(f"[yellow]{target} 已经处于停用状态[/yellow]")
+            return False
+        SOURCE_CONFIG[target]['enabled'] = False
+        console.print(f"[yellow]{target} 已停用[/yellow]")
+        if target in ws_connections:
+            try:
+                ws_connections[target].close()
+            except:
+                pass
+        if target == 'p2p' and 'epsp_client' in globals():
+            epsp_client.running = False
+            if epsp_client.sock:
+                try:
+                    epsp_client.sock.close()
+                except:
+                    pass
+        return True
+
+    # 辅助函数：启用单个数据源
+    def _enable_source(target):
+        if target not in SOURCE_CONFIG:
+            console.print(f"[yellow]未知数据源: {target}[/yellow]")
+            return False
+        if SOURCE_CONFIG[target]['enabled']:
+            console.print(f"[yellow]{target} 已经处于启用状态[/yellow]")
+            return False
+        SOURCE_CONFIG[target]['enabled'] = True
+        console.print(f"[green]{target} 已启用，正在连接...[/green]")
+        if target == 'p2p':
+            epsp_client.start()
+        elif target == 'nied':
+            threading.Thread(target=start_nied_websocket, daemon=True).start()
+        elif target == 'wolfx':
+            threading.Thread(target=start_websocket, args=(target,), daemon=True).start()
+        else:
+            threading.Thread(target=start_websocket, args=(target,), daemon=True).start()
+        return True
+
+    if parts[0] == 'help':
+        console.print("[cyan]可用命令:[/cyan]")
+        console.print("  test                          - 模拟地震多报演示")
+        console.print("  debug [on|off]                - 开启/关闭调试模式")
+        console.print("  stop <source>                 - 停用数据源 (wolfx/p2p/nied/all)")
+        console.print("  enable <source>               - 启用数据源")
+        console.print("  restart <source>              - 重启数据源 (或 restart all)")
+        console.print("  status                        - 查看所有数据源状态")
+        console.print("  help                          - 显示此帮助")
+        console.print("[dim]快捷键: Ctrl+C 退出[/dim]")
+        return
+    elif parts[0] == 'test':
         run_mock_test()
         return
     elif parts[0] == 'debug':
@@ -925,49 +980,41 @@ def handle_command(cmd):
         return
     elif parts[0] == 'stop':
         if len(parts) < 2:
-            console.print("[yellow]用法: stop <wolfx|p2p|nied>[/yellow]")
+            console.print("[yellow]用法: stop <source>[/yellow]")
             return
         target = parts[1]
-        if target not in SOURCE_CONFIG:
-            console.print(f"[yellow]未知数据源: {target}[/yellow]")
+        if target == 'all':
+            for key in SOURCE_CONFIG:
+                _stop_source(key)
             return
-        if not SOURCE_CONFIG[target]['enabled']:
-            console.print(f"[yellow]{target} 已经处于停用状态[/yellow]")
-            return
-        SOURCE_CONFIG[target]['enabled'] = False
-        console.print(f"[yellow]{target} 已停用[/yellow]")
-        if target in ws_connections:
-            try:
-                ws_connections[target].close()
-            except:
-                pass
-        if target == 'p2p' and 'epsp_client' in globals():
-            epsp_client.running = False
-            if epsp_client.sock:
-                try:
-                    epsp_client.sock.close()
-                except:
-                    pass
+        else:
+            _stop_source(target)
         return
     elif parts[0] == 'enable':
         if len(parts) < 2:
-            console.print("[yellow]用法: enable <wolfx|p2p|nied>[/yellow]")
+            console.print("[yellow]用法: enable <source>[/yellow]")
             return
         target = parts[1]
-        if target not in SOURCE_CONFIG:
-            console.print(f"[yellow]未知数据源: {target}[/yellow]")
+        if target == 'all':
+            for key in SOURCE_CONFIG:
+                _enable_source(key)
             return
-        if SOURCE_CONFIG[target]['enabled']:
-            console.print(f"[yellow]{target} 已经处于启用状态[/yellow]")
-            return
-        SOURCE_CONFIG[target]['enabled'] = True
-        console.print(f"[green]{target} 已启用，正在连接...[/green]")
-        if target == 'p2p':
-            epsp_client.start()
-        elif target == 'nied':
-            threading.Thread(target=start_nied_websocket, daemon=True).start()
         else:
-            threading.Thread(target=start_websocket, args=(target,), daemon=True).start()
+            _enable_source(target)
+        return
+    elif parts[0] == 'restart':
+        if len(parts) < 2:
+            console.print("[yellow]用法: restart <source> 或 restart all[/yellow]")
+            return
+        target = parts[1]
+        sources = list(SOURCE_CONFIG.keys()) if target == 'all' else [target]
+        for src in sources:
+            if src not in SOURCE_CONFIG:
+                console.print(f"[yellow]未知数据源: {src}，跳过[/yellow]")
+                continue
+            if SOURCE_CONFIG[src]['enabled']:
+                _stop_source(src)
+            _enable_source(src)
         return
     elif parts[0] == 'status':
         console.print("[cyan]当前数据源状态:[/cyan]")
@@ -1083,22 +1130,25 @@ def main():
     if not os.path.exists(SOUND_NHK):
         console.print("[yellow]提示: 紧急铃声文件未找到，将无法播放。[/yellow]")
 
-    console.print("[cyan]数据源: Wolfx + P2PQuake (EPSP) + NIED[/cyan]")
-    console.print("[cyan]按 Ctrl+C 可退出程序。[/cyan]\n")
+    console.print("[cyan]数据源: Wolfx + P2PQuake(EPSP) + NIED[/cyan]")
+    console.print("[cyan]按 Ctrl+C 退出[/cyan]")
+    console.print("[cyan]输入 help 查看命令[/cyan]\n")
 
     fetch_initial_snapshots()
 
-    for source_key, config in SOURCE_CONFIG.items():
-        if source_key == 'wolfx' and config['enabled']:
-            ws_status[source_key] = 'connecting'
-            threading.Thread(target=start_websocket, args=(source_key,), daemon=True).start()
-            time.sleep(1)
+    # 启动 Wolfx
+    if SOURCE_CONFIG.get('wolfx', {}).get('enabled', False):
+        ws_status['wolfx'] = 'connecting'
+        threading.Thread(target=start_websocket, args=('wolfx',), daemon=True).start()
+        time.sleep(1)
 
+    # 启动 NIED
     if SOURCE_CONFIG.get('nied', {}).get('enabled', False):
         ws_status['nied'] = 'connecting'
         threading.Thread(target=start_nied_websocket, daemon=True).start()
         time.sleep(1)
 
+    # 启动 P2PQuake EPSP
     epsp_client = EPSPClient()
     if SOURCE_CONFIG['p2p']['enabled']:
         ws_status['p2p'] = 'connecting'
