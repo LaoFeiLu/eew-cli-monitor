@@ -110,7 +110,27 @@ sounds/
 pyinstaller --onefile --console --add-data "sounds/alert.wav;sounds" --add-data "sounds/nhk_bell.wav;sounds" --exclude-module gevent eew-cli-monitor.py
 ```
 - 生成的可执行文件位于 dist/ 目录，双击即可运行。
-  
+
+### 使用方法
+```cmd
+    可用命令:
+      test                          - 模拟地震多报演示
+      debug                         - 开启/关闭调试模式
+      export on/off                 - 开启/关闭表格导出到CSV
+      export path <文件路径>         - 设置导出文件路径（相对路径）
+      stop <source>                 - 停用数据源 (wolfx/p2p/nied/fan/fanw/all)
+      stop <source>/<subtype>       - 停用子源 (如 stop fan/cenc)
+      stop <source>/all             - 停用该数据源所有子源 (如 stop fan/all)
+      enable <source>               - 启用数据源
+      enable <source>/<subtype>     - 启用子源
+      enable <source>/all           - 启用该数据源所有子源 (如 enable fan/all)
+      restart <source>              - 重启数据源 (或 restart all)
+      reset                         - 一键恢复所有配置到默认状态并自动重连
+      status                        - 查看所有数据源状态
+      help                          - 显示此帮助
+    快捷键: Ctrl+C 退出
+```
+
 ### 说明
 
 - 本人为高中生，能力有限，项目如有错误请谅解，可以向3822104508@qq.com提交错误,本人会尽力解决

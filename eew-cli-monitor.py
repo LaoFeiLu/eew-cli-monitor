@@ -7,6 +7,7 @@ import random
 import json
 import threading
 import socket
+import csv
 from datetime import datetime
 from rich.console import Console
 from rich.table import Table
@@ -80,9 +81,31 @@ def safe_get(dic, *keys, default='N/A'):
         val = dic.get(key)
         if val is not None:
             if isinstance(val, str):
-                return val  # 即使是空串也返回，不过滤
+                return val
             return val
     return default
+
+
+# ================== 配置文件路径（持久化） ==================
+CONFIG_FILE = "eew_monitor_config.json"
+
+
+def load_config():
+    try:
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+
+def save_config(config):
+    try:
+        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        console.print(f"[red]保存配置失败: {e}[/red]")
 
 
 # ================== 数据源配置 ==================
@@ -215,6 +238,41 @@ ws_running = True
 ws_connections = {}
 ws_status = {}
 
+# ================== 导出功能全局变量 ==================
+EXPORT_ENABLED = False
+EXPORT_FILE = None
+EXPORT_FILE_PATH = None
+# ==================================================
+
+
+# ---------- 表格显示与导出 ----------
+def write_table_to_csv(title, rows):
+    """将表格数据写入CSV文件（追加模式）"""
+    global EXPORT_FILE, EXPORT_FILE_PATH
+    if not EXPORT_ENABLED:
+        return
+    try:
+        if EXPORT_FILE is None:
+            # 确定文件名
+            if EXPORT_FILE_PATH:
+                filename = EXPORT_FILE_PATH
+            else:
+                prog_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = os.path.join(prog_dir, f"quake_export_{timestamp}.csv")
+            # 确保目录存在
+            os.makedirs(os.path.dirname(os.path.abspath(filename)), exist_ok=True)
+            EXPORT_FILE = open(filename, 'a', newline='', encoding='utf-8-sig')
+            if os.path.getsize(filename) == 0:
+                writer = csv.writer(EXPORT_FILE)
+                writer.writerow(["表格标题", "项目", "信息"])
+        writer = csv.writer(EXPORT_FILE)
+        for row in rows:
+            writer.writerow([title, row[0], row[1]])
+        EXPORT_FILE.flush()
+    except Exception as e:
+        console.print(f"[red]写入CSV失败: {e}[/red]")
+
 
 def print_earthquake_table(title, rows, source_label):
     if not rows:
@@ -222,10 +280,12 @@ def print_earthquake_table(title, rows, source_label):
     table = Table(title=title, box=box.ROUNDED, border_style="bold yellow")
     table.add_column("项目", style="cyan", no_wrap=True, width=12)
     table.add_column("信息", style="white", no_wrap=False, width=48)
-    rows.append(["信号源", source_label])
-    for row in rows:
+    rows_with_src = rows.copy()
+    rows_with_src.append(["信号源", source_label])
+    for row in rows_with_src:
         table.add_row(str(row[0]), str(row[1]))
     console.print(table)
+    write_table_to_csv(title, rows_with_src)
 
 
 def print_weather_table(title, rows, source_label):
@@ -234,10 +294,12 @@ def print_weather_table(title, rows, source_label):
     table = Table(title=title, box=box.ROUNDED, border_style="bold blue")
     table.add_column("项目", style="cyan", no_wrap=True, width=12)
     table.add_column("信息", style="white", no_wrap=False, width=48)
-    rows.append(["信号源", source_label])
-    for row in rows:
+    rows_with_src = rows.copy()
+    rows_with_src.append(["信号源", source_label])
+    for row in rows_with_src:
         table.add_row(str(row[0]), str(row[1]))
     console.print(table)
+    write_table_to_csv(title, rows_with_src)
 
 
 # ---------- 海啸预警 (FAN tsunami) ----------
@@ -285,6 +347,7 @@ def process_tsunami(data, source_label):
             for row in rows:
                 table.add_row(row[0], str(row[1]))
             console.print(table)
+            write_table_to_csv("海啸预警 (自然资源部)", rows)
             play_sound(SOUND_ALERT, is_nhk=False)
     except Exception as e:
         console.print(f"[red]海啸预警解析错误: {e}[/red]")
@@ -402,7 +465,7 @@ def process_cenc_eew(data, source_key, source_label):
 
     rows = []
     rows.append(["发震时刻", safe_get(data, 'OriginTime', 'origin_time', 'shockTime')])
-    rows.append(["震中位置", safe_get(data, 'HypoCenter', 'Hypocenter', 'hypocenter', 'placeName')])  # 关键修正
+    rows.append(["震中位置", safe_get(data, 'HypoCenter', 'Hypocenter', 'hypocenter', 'placeName')])
     lat = safe_get(data, 'Latitude', 'latitude')
     lon = safe_get(data, 'Longitude', 'longitude')
     rows.append(["坐标", f"{lat}, {lon}" if lat and lon else '未知'])
@@ -763,7 +826,7 @@ def scale_to_jma(scale_code):
     return scale_map.get(scale_code, "不明")
 
 
-# ---------- EPSPClient 修正版本 ----------
+# ---------- EPSPClient ----------
 class EPSPClient:
     def __init__(self):
         self.servers = ['www.p2pquake.net', 'p2pquake.info', 'p2pquake.xyz', 'p2pquake.ddo.jp']
@@ -771,14 +834,14 @@ class EPSPClient:
         self.running = True
         self.sock = None
         self.peer_id = None
-        self.region_code = 250      # 根据抓包调整为250（也可以保留901，但抓包显示250）
+        self.region_code = 250
         self.connected_peers = {}
         self.lock = threading.Lock()
         self.server_index = 0
         self.recv_buffer = ""
         self.listener = None
         self.listener_thread = None
-        self.max_connections = 20   # 可调整
+        self.max_connections = 20
 
     def start(self):
         self._start_listener()
@@ -822,12 +885,8 @@ class EPSPClient:
                 self._send("131 1 0.38:EEW_CLI:2.0")
                 if DEBUG:
                     console.print("[dim]发送协议版本: 131 1 0.38:EEW_CLI:2.0[/dim]")
-                self._receive_loop()  # 阻塞直到连接断开
-                # 断开后，如果 self.running 为 True，继续尝试下一个服务器
-                if not self.running:
-                    break
-                self.server_index += 1
-                time.sleep(3)
+                self._receive_loop()
+                break
             except socket.timeout:
                 if DEBUG:
                     console.print(f"[red]连接 {host} 超时[/red]")
@@ -838,14 +897,6 @@ class EPSPClient:
                     console.print(f"[red]连接 {host} 失败: {e}[/red]")
                 self.server_index += 1
                 time.sleep(3)
-            finally:
-                # 确保套接字被关闭并置空
-                if self.sock:
-                    try:
-                        self.sock.close()
-                    except:
-                        pass
-                    self.sock = None
         if not self.running:
             console.print("[red]P2PQuake (EPSP) 连接失败，已放弃[/red]")
 
@@ -869,8 +920,6 @@ class EPSPClient:
     def _receive_loop(self):
         while self.running:
             try:
-                if self.sock is None:
-                    break
                 data = self.sock.recv(4096)
                 if not data:
                     if DEBUG:
@@ -887,17 +936,14 @@ class EPSPClient:
                         self._handle_line(line)
             except socket.timeout:
                 continue
-            except OSError as e:
-                # 套接字已关闭（如主动关闭或网络错误）
-                if DEBUG:
-                    console.print(f"[dim]套接字错误: {e}[/dim]")
-                break
             except Exception as e:
                 console.print(f"[red]接收错误: {e}[/red]")
                 break
-        # 不再递归调用 _run，只打印信息，由 _run 循环处理重连
         if self.running:
-            console.print("[yellow]P2PQuake (EPSP) 连接已关闭，将尝试重连...[/yellow]")
+            console.print("[yellow]P2PQuake (EPSP) 连接已关闭，5秒后重连...[/yellow]")
+            self.server_index += 1
+            time.sleep(5)
+            self._run()
 
     def _handle_line(self, line):
         try:
@@ -913,11 +959,9 @@ class EPSPClient:
                 console.print(f"[dim]处理代码 {code}, 数据: {data[:50]}[/dim]")
 
             if code == '295':
-                # 密钥已分配或无需分配，忽略即可，继续处理后续消息
                 if DEBUG:
                     console.print("[dim]服务器返回 295（密钥已分配），忽略[/dim]")
-                return  # 也可以不 return，但 295 没有后续数据，直接返回安全
-
+                return
             if code == '212':
                 if DEBUG:
                     console.print(f"[dim]服务器版本: {data}[/dim]")
@@ -930,31 +974,24 @@ class EPSPClient:
             elif code == '235':
                 if DEBUG:
                     console.print(f"[dim]收到节点列表，长度: {len(data)}[/dim]")
-                self._connect_to_peers(data)  # 内部会发送 155
+                self._connect_to_peers(data)
                 current_conn = len(self.connected_peers)
                 self._send(f"116 1 {self.peer_id}:6911:{self.region_code}:{current_conn}:{self.max_connections}")
                 if DEBUG:
-                    console.print(
-                        f"[dim]发送 116: {self.peer_id}:6911:{self.region_code}:{current_conn}:{self.max_connections}[/dim]")
+                    console.print(f"[dim]发送 116: {self.peer_id}:6911:{self.region_code}:{current_conn}:{self.max_connections}[/dim]")
             elif code == '236':
                 console.print(f"[green]P2PQuake (EPSP) 已连接 (总节点数: {data})[/green]")
                 ws_status['p2p'] = 'connected'
-                # 先获取地域ピア数和协议时间（即使没有密钥）
                 self._send("127 1")
                 self._send("118 1")
-                # 尝试获取密钥（如果返回 295 会被上面忽略）
                 self._send(f"117 1 {self.peer_id}")
             elif code == '237':
-                # 收到密钥，保存（这里可以提取密钥，但暂不使用）
                 if DEBUG:
                     console.print("[dim]收到密钥[/dim]")
-                # 可以解析密钥，但我们只做接收显示，不需要签名
             elif code == '247':
-                # 地域ピア数（可忽略）
                 if DEBUG:
                     console.print("[dim]收到地域ピア数[/dim]")
             elif code == '238':
-                # 协议时间（可忽略）
                 if DEBUG:
                     console.print("[dim]收到协议时间[/dim]")
             elif code == '551':
@@ -979,18 +1016,22 @@ class EPSPClient:
                     console.print(f"[dim]忽略代码 {code}[/dim]")
         except Exception as e:
             console.print(f"[red]处理消息错误: {e}[/red]")
+
     def _connect_to_peers(self, peer_data):
-        peers = peer_data.split(':')
+        peers = peer_data.strip().split(':')
         connected_ids = []
         for peer_info in peers:
+            peer_info = peer_info.strip()
+            if not peer_info:
+                continue
             try:
                 parts = peer_info.split(',')
                 if len(parts) >= 3:
-                    ip = parts[0]
-                    port = int(parts[1])
-                    pid = parts[2]
+                    ip = parts[0].strip()
+                    port = int(parts[1].strip())
+                    pid = parts[2].strip()
                     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    sock.settimeout(3)
+                    sock.settimeout(1)
                     sock.connect((ip, port))
                     sock.send(b"614 1 0.38:EEW_CLI:2.0\r\n")
                     response = sock.recv(1024).decode('shift-jis', errors='ignore')
@@ -1006,11 +1047,14 @@ class EPSPClient:
                             sock.close()
                     else:
                         sock.close()
+                else:
+                    if DEBUG:
+                        console.print(f"[dim]忽略格式错误节点: {peer_info}[/dim]")
             except Exception as e:
                 if DEBUG:
                     console.print(f"[dim]连接节点 {peer_info} 失败: {e}[/dim]")
-        # 发送 155 通知服务器已连接的节点 ID
-        self._send_connected_peers(connected_ids)
+        if connected_ids:
+            self._send_connected_peers(connected_ids)
 
     def _handle_earthquake_data(self, data):
         try:
@@ -1019,10 +1063,8 @@ class EPSPClient:
                 return
             signature, expiry, summary, detail = parts
             summary_parts = summary.split(',')
-            if len(summary_parts) < 11:
-                # 补齐
-                while len(summary_parts) < 12:
-                    summary_parts.append('N/A')
+            while len(summary_parts) < 12:
+                summary_parts.append('N/A')
             origin_time = summary_parts[0]
             intensity = summary_parts[1]
             tsunami = summary_parts[2]
@@ -1074,6 +1116,7 @@ class EPSPClient:
             for row in rows[1:]:
                 table.add_row(row[0], row[1])
             console.print(table)
+            write_table_to_csv("海嘯預警 (P2PQuake)", rows[1:])
             play_sound(SOUND_ALERT, is_nhk=False)
         except Exception as e:
             console.print(f"[red]解析海嘯數據失敗: {e}[/red]")
@@ -1518,7 +1561,7 @@ def start_websocket(source_key):
 
 # ---------- 命令处理 ----------
 def handle_command(cmd):
-    global DEBUG, SOURCE_CONFIG, FILTER_DETAIL
+    global DEBUG, SOURCE_CONFIG, FILTER_DETAIL, EXPORT_ENABLED, EXPORT_FILE, EXPORT_FILE_PATH
     parts = cmd.split()
     if not parts:
         return
@@ -1571,6 +1614,8 @@ def handle_command(cmd):
         console.print("[cyan]可用命令:[/cyan]")
         console.print("  test                          - 模拟地震多报演示")
         console.print("  debug [on|off]                - 开启/关闭调试模式")
+        console.print("  export on/off                 - 开启/关闭表格导出到CSV")
+        console.print("  export path <文件路径>        - 设置导出文件路径（相对路径）")
         console.print("  stop <source>                 - 停用数据源 (wolfx/p2p/nied/fan/fanw/all)")
         console.print("  stop <source>/<subtype>       - 停用子源 (如 stop fan/cenc)")
         console.print("  stop <source>/all             - 停用该数据源所有子源 (如 stop fan/all)")
@@ -1601,6 +1646,46 @@ def handle_command(cmd):
                 console.print("[dim]调试模式: 关闭[/dim]")
             else:
                 console.print("[yellow]用法: debug [on|off] 或 debug (切换)[/yellow]")
+        return
+
+    elif parts[0] == 'export':
+        if len(parts) < 2:
+            console.print("[yellow]用法: export on / export off / export path <文件路径>[/yellow]")
+            return
+        if parts[1] == 'on':
+            EXPORT_ENABLED = True
+            console.print("[green]表格导出已开启[/green]")
+            if EXPORT_FILE_PATH:
+                console.print(f"[dim]目标文件: {EXPORT_FILE_PATH}[/dim]")
+            else:
+                console.print("[dim]未指定路径，将自动生成文件名。使用 'export path <路径>' 设置。[/dim]")
+        elif parts[1] == 'off':
+            EXPORT_ENABLED = False
+            if EXPORT_FILE:
+                EXPORT_FILE.close()
+                EXPORT_FILE = None
+            console.print("[yellow]表格导出已关闭[/yellow]")
+        elif parts[1] == 'path':
+            if len(parts) < 3:
+                console.print("[yellow]用法: export path <文件路径>[/yellow]")
+                return
+            raw_path = parts[2]
+            # 如果是相对路径，转换为基于程序所在目录的绝对路径
+            if not os.path.isabs(raw_path):
+                prog_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+                EXPORT_FILE_PATH = os.path.join(prog_dir, raw_path)
+            else:
+                EXPORT_FILE_PATH = raw_path
+            # 保存配置
+            config = load_config()
+            config['export_path'] = EXPORT_FILE_PATH
+            save_config(config)
+            if EXPORT_FILE:
+                EXPORT_FILE.close()
+                EXPORT_FILE = None
+            console.print(f"[green]导出路径已设置为: {EXPORT_FILE_PATH} (已保存配置)[/green]")
+        else:
+            console.print("[yellow]参数错误，请用 on / off / path[/yellow]")
         return
 
     elif parts[0] == 'stop':
@@ -1767,7 +1852,10 @@ def handle_command(cmd):
         for sub in FAN_SUBTYPES:
             if sub not in FILTER_DETAIL['fan']:
                 FILTER_DETAIL['fan'][sub] = False
-
+        # 重置导出路径配置（可选）
+        EXPORT_FILE_PATH = None
+        save_config({})
+        console.print("[dim]导出路径配置已重置[/dim]")
         console.print("[green]配置已恢复默认，正在重新连接所有数据源...[/green]")
         handle_command('restart all')
         return
@@ -1880,7 +1968,7 @@ def check_user_command():
 
 # ================== 主程序 ==================
 def main():
-    global ws_running, epsp_client
+    global ws_running, epsp_client, EXPORT_FILE, EXPORT_FILE_PATH
 
     if not WS_AVAILABLE:
         console.print("[red]错误: websocket-client 未安装，WebSocket 数据源将不可用[/red]")
@@ -1890,6 +1978,12 @@ def main():
         console.print("[yellow]提示: 普通提示音文件未找到，将无法播放。[/yellow]")
     if not os.path.exists(SOUND_NHK):
         console.print("[yellow]提示: 紧急铃声文件未找到，将无法播放。[/yellow]")
+
+    # 加载持久化配置
+    config = load_config()
+    if 'export_path' in config:
+        EXPORT_FILE_PATH = config['export_path']
+        console.print(f"[dim]加载导出路径配置: {EXPORT_FILE_PATH}[/dim]")
 
     console.print("[cyan]数据源: Wolfx(快照) + P2PQuake(EPSP) + NIED + FAN Studio(地震) + FAN Weather(气象)[/cyan]")
     console.print("[cyan]按 Ctrl+C 退出[/cyan]")
@@ -1928,6 +2022,8 @@ def main():
         ws_running = False
         if 'epsp_client' in globals():
             epsp_client.running = False
+        if EXPORT_FILE:
+            EXPORT_FILE.close()
         console.print("\n[bold red]程序已退出，感谢使用！[/bold red]")
         sys.exit(0)
 
