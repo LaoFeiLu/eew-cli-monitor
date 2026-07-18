@@ -8,6 +8,7 @@ import json
 import threading
 import socket
 import csv
+import re
 from datetime import datetime
 from rich.console import Console
 from rich.table import Table
@@ -86,6 +87,62 @@ def safe_get(dic, *keys, default='N/A'):
     return default
 
 
+def to_roman(num):
+    """将数字（1~12）转换为罗马数字"""
+    if num is None:
+        return 'N/A'
+    try:
+        n = int(round(float(num)))
+        if n < 1 or n > 12:
+            return str(n)
+        roman_map = {
+            1: 'I', 2: 'II', 3: 'III', 4: 'IV', 5: 'V',
+            6: 'VI', 7: 'VII', 8: 'VIII', 9: 'IX',
+            10: 'X', 11: 'XI', 12: 'XII'
+        }
+        return roman_map.get(n, str(n))
+    except:
+        return str(num)
+
+
+def estimate_intensity(magnitude, depth_km, output_type='number'):
+    try:
+        if magnitude is None or magnitude == 'N/A' or magnitude == '':
+            return 'N/A'
+        M = float(magnitude)
+        if depth_km and depth_km != 'N/A':
+            if isinstance(depth_km, str):
+                match = re.search(r'(\d+\.?\d*)', depth_km)
+                d = float(match.group(1)) if match else 15.0
+            else:
+                d = float(depth_km)
+        else:
+            d = 15.0
+        intensity = M + 1.5 - 0.05 * d
+        if intensity < 1:
+            intensity = 1
+        elif intensity > 12:
+            intensity = 12
+        if output_type == 'roman':
+            return f"{to_roman(intensity)}(估算)"
+        else:
+            return f"{round(intensity, 1)}度(估算)"
+    except:
+        return 'N/A'
+
+
+def get_intensity_display(data, source_type=None):
+    official = safe_get(data, 'epiIntensity', 'maxIntensity', 'MaxIntensity')
+    if official != 'N/A' and official not in (None, '', '未知'):
+        return official
+    mag = safe_get(data, 'magnitude', 'Magunitude')
+    depth = safe_get(data, 'depth', 'Depth')
+    if source_type in ('jma', 'nied', 'p2p', 'p2pjson'):
+        return estimate_intensity(mag, depth, 'number')
+    else:
+        return estimate_intensity(mag, depth, 'roman')
+
+
 # ================== 配置文件路径（持久化） ==================
 CONFIG_FILE = "eew_monitor_config.json"
 
@@ -120,8 +177,16 @@ SOURCE_CONFIG = {
     },
     'p2p': {
         'name': 'P2PQuake (EPSP)',
-        'enabled': True,
+        'enabled': False,
         'type': 'jma_only'
+    },
+    'p2pjson': {
+        'name': 'P2PQuake (JSON API v2)',
+        'url': 'wss://api.p2pquake.net/v2/ws',
+        'enabled': True,
+        'type': 'websocket',
+        'need_subscribe': True,
+        'subscribe_msg': '{"type":"subscribe","topic":"all"}'
     },
     'nied': {
         'name': 'NIED (日本防灾科学技术研究所)',
@@ -138,23 +203,15 @@ SOURCE_CONFIG = {
         'type': 'all',
         'need_subscribe': False,
         'fallback_urls': ['wss://ws.fanstudio.hk/all']
-    },
-    'fanw': {
-        'name': 'FAN Weather (气象预警)',
-        'url': 'wss://ws.fanstudio.tech/weatheralarm',
-        'enabled': True,
-        'type': 'weather',
-        'need_subscribe': False,
-        'fallback_urls': []
     }
 }
 
 SOURCE_DISPLAY = {
     'wolfx': 'Wolfx',
     'p2p': 'P2PQuake (EPSP)',
+    'p2pjson': 'P2PQuake (JSON API)',
     'nied': 'NIED',
-    'fan': 'FAN Studio',
-    'fanw': 'FAN Weather'
+    'fan': 'FAN Studio'
 }
 
 HTTP_URLS = {
@@ -187,6 +244,7 @@ FILTER_DETAIL = {
     'p2p': {
         'jma': True
     },
+    'p2pjson': {},
     'nied': {},
     'fan': {
         'cea': True,
@@ -211,8 +269,7 @@ FILTER_DETAIL = {
         'kma-eew': False,
         'fssn': False,
         'fssn-cmt': False,
-    },
-    'fanw': {}
+    }
 }
 for sub in FAN_SUBTYPES:
     if sub not in FILTER_DETAIL['fan']:
@@ -226,10 +283,12 @@ FILTER_CONFIG = {
     'cq': False
 }
 
-FAN_RECONNECT_DELAY = 1800
+# FAN 重连冷却时间：改为 5 分钟
+FAN_RECONNECT_DELAY = 300
 fan_last_reconnect_time = 0
-FANW_RECONNECT_DELAY = 1800
-fanw_last_reconnect_time = 0
+
+# P2P JSON 重连配置
+p2pjson_reconnect_delay = 5
 
 processed_events = set()
 high_intensity_state = {}
@@ -247,20 +306,17 @@ EXPORT_FILE_PATH = None
 
 # ---------- 表格显示与导出 ----------
 def write_table_to_csv(title, rows):
-    """将表格数据写入CSV文件（追加模式）"""
     global EXPORT_FILE, EXPORT_FILE_PATH
     if not EXPORT_ENABLED:
         return
     try:
         if EXPORT_FILE is None:
-            # 确定文件名
             if EXPORT_FILE_PATH:
                 filename = EXPORT_FILE_PATH
             else:
                 prog_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 filename = os.path.join(prog_dir, f"quake_export_{timestamp}.csv")
-            # 确保目录存在
             os.makedirs(os.path.dirname(os.path.abspath(filename)), exist_ok=True)
             EXPORT_FILE = open(filename, 'a', newline='', encoding='utf-8-sig')
             if os.path.getsize(filename) == 0:
@@ -363,12 +419,17 @@ def process_fan_data(data, sub_type, source_label):
     rows.append(["坐标", f"{lat}, {lon}" if lat and lon else '未知'])
     rows.append(["震级(M)", safe_get(data, 'magnitude', 'Magunitude')])
     rows.append(["深度(km)", safe_get(data, 'depth', 'Depth')])
-    rows.append(["最大震度/烈度", safe_get(data, 'epiIntensity', 'maxIntensity', 'MaxIntensity')])
+    if sub_type in ('jma', 'nied', 'p2p', 'p2pjson'):
+        rows.append(["最大震度/烈度", get_intensity_display(data, 'jma')])
+    else:
+        rows.append(["最大震度/烈度", get_intensity_display(data, 'cenc')])
     rows.append(["最终报", "是" if data.get('final', False) else "否"])
     rows.append(["取消报", "是" if data.get('cancel', False) else "否"])
     rows.append(["更新报数", str(data.get('updates', 1))])
-    rows.append(["信息类型", safe_get(data, 'infoTypeName', 'info_type')])
-
+    info_type = safe_get(data, 'infoTypeName', 'info_type')
+    if info_type == 'N/A' or info_type == '' or info_type is None:
+        info_type = '地震测定报'
+    rows.append(["信息类型", info_type])
     affected = data.get('locationDesc', [])
     rows.append(["影响区域", ', '.join(affected) if affected else '无'])
 
@@ -393,7 +454,7 @@ def process_fan_data(data, sub_type, source_label):
         play_sound(SOUND_ALERT, is_nhk=False)
 
 
-# ---------- Wolfx 各处理函数（不过滤字段） ----------
+# ---------- Wolfx 各处理函数 ----------
 def process_jma_eew(data, source_key, source_label):
     global nhk_block_until
     event_id = safe_get(data, 'EventID', 'id', default='')
@@ -471,7 +532,7 @@ def process_cenc_eew(data, source_key, source_label):
     rows.append(["坐标", f"{lat}, {lon}" if lat and lon else '未知'])
     rows.append(["震级(M)", safe_get(data, 'Magunitude', 'magnitude')])
     rows.append(["深度(km)", safe_get(data, 'Depth', 'depth')])
-    rows.append(["最大烈度(中国)", safe_get(data, 'MaxIntensity', 'max_intensity', 'epiIntensity')])
+    rows.append(["最大烈度(中国)", get_intensity_display(data, 'cenc')])
     rows.append(["最终报", "是" if data.get('isFinal', data.get('is_final', False)) else "否"])
 
     print_earthquake_table("地震情报 (中国地震台网中心 CENC)", rows, source_label)
@@ -492,7 +553,7 @@ def process_sc_eew(data, source_key, source_label):
     rows.append(["坐标", f"{lat}, {lon}" if lat and lon else '未知'])
     rows.append(["震级(M)", safe_get(data, 'Magunitude', 'magnitude')])
     rows.append(["深度(km)", safe_get(data, 'Depth', 'depth')])
-    rows.append(["最大烈度(中国)", safe_get(data, 'MaxIntensity', 'max_intensity')])
+    rows.append(["最大烈度(中国)", get_intensity_display(data, 'cenc')])
     rows.append(["警报触发", "是" if data.get('isWarn', False) else "否"])
 
     print_earthquake_table("地震测定报 (四川省地震局 SC)", rows, source_label)
@@ -513,7 +574,7 @@ def process_fj_eew(data, source_key, source_label):
     rows.append(["坐标", f"{lat}, {lon}" if lat and lon else '未知'])
     rows.append(["震级(M)", safe_get(data, 'Magunitude', 'magnitude')])
     rows.append(["深度(km)", safe_get(data, 'Depth', 'depth')])
-    rows.append(["最大烈度(中国)", safe_get(data, 'MaxIntensity', 'max_intensity')])
+    rows.append(["最大烈度(中国)", get_intensity_display(data, 'cenc')])
 
     print_earthquake_table("地震测定报 (福建省地震局 FJ)", rows, source_label)
 
@@ -533,7 +594,7 @@ def process_cq_eew(data, source_key, source_label):
     rows.append(["坐标", f"{lat}, {lon}" if lat and lon else '未知'])
     rows.append(["震级(M)", safe_get(data, 'Magunitude', 'magnitude')])
     rows.append(["深度(km)", safe_get(data, 'Depth', 'depth')])
-    rows.append(["最大烈度(中国)", safe_get(data, 'MaxIntensity', 'max_intensity')])
+    rows.append(["最大烈度(中国)", get_intensity_display(data, 'cenc')])
 
     print_earthquake_table("地震测定报 (重庆市地震局 CQ)", rows, source_label)
 
@@ -553,7 +614,7 @@ def process_cea_eew(data, source_key, source_label):
     rows.append(["坐标", f"{lat}, {lon}" if lat and lon else '未知'])
     rows.append(["震级(M)", safe_get(data, 'magnitude', 'Magunitude')])
     rows.append(["深度(km)", safe_get(data, 'depth', 'Depth')])
-    rows.append(["预估烈度", safe_get(data, 'epiIntensity')])
+    rows.append(["预估烈度", get_intensity_display(data, 'cenc')])
 
     print_earthquake_table("地震预警速报 (中国地震预警网 CEA)", rows, source_label)
 
@@ -573,7 +634,7 @@ def process_cwa_eew(data, source_key, source_label):
     rows.append(["坐标", f"{lat}, {lon}" if lat and lon else '未知'])
     rows.append(["震级(M)", safe_get(data, 'magnitude', 'Magunitude')])
     rows.append(["深度(km)", safe_get(data, 'depth', 'Depth')])
-    rows.append(["最大震度", safe_get(data, 'maxIntensity', 'MaxIntensity')])
+    rows.append(["最大震度", get_intensity_display(data, 'cenc')])
     affected = data.get('locationDesc', [])
     rows.append(["影响区域", ', '.join(affected) if affected else '无'])
 
@@ -595,7 +656,7 @@ def process_cwa_report(data, source_key, source_label):
     rows.append(["坐标", f"{lat}, {lon}" if lat and lon else '未知'])
     rows.append(["震级(M)", safe_get(data, 'magnitude', 'Magunitude')])
     rows.append(["深度(km)", safe_get(data, 'depth', 'Depth')])
-    rows.append(["最大震度", safe_get(data, 'maxIntensity', 'MaxIntensity')])
+    rows.append(["最大震度", get_intensity_display(data, 'cenc')])
 
     print_earthquake_table("地震报告 (台湾气象署 CWA)", rows, source_label)
 
@@ -615,7 +676,7 @@ def process_provincial_eew(data, source_key, source_label, province_name):
     rows.append(["坐标", f"{lat}, {lon}" if lat and lon else '未知'])
     rows.append(["震级(M)", safe_get(data, 'magnitude', 'Magunitude')])
     rows.append(["深度(km)", safe_get(data, 'depth', 'Depth')])
-    rows.append(["最大烈度", safe_get(data, 'maxIntensity', 'epiIntensity')])
+    rows.append(["最大烈度", get_intensity_display(data, 'cenc')])
 
     print_earthquake_table(f"地震测定报 ({province_name}省地震局)", rows, source_label)
 
@@ -635,6 +696,7 @@ def process_hko_eew(data, source_key, source_label):
     rows.append(["坐标", f"{lat}, {lon}" if lat and lon else '未知'])
     rows.append(["震级(M)", safe_get(data, 'magnitude', 'Magunitude')])
     rows.append(["深度(km)", safe_get(data, 'depth', 'Depth')])
+    rows.append(["最大震度/烈度", get_intensity_display(data, 'cenc')])
     rows.append(["区域", safe_get(data, 'region', 'citystring')])
 
     print_earthquake_table("地震报告 (香港天文台 HKO)", rows, source_label)
@@ -655,6 +717,7 @@ def process_usgs_eew(data, source_key, source_label):
     rows.append(["坐标", f"{lat}, {lon}" if lat and lon else '未知'])
     rows.append(["震级(M)", safe_get(data, 'magnitude', 'Magunitude')])
     rows.append(["深度(km)", safe_get(data, 'depth', 'Depth')])
+    rows.append(["最大震度/烈度", get_intensity_display(data, 'cenc')])
     rows.append(["标题", safe_get(data, 'title')])
 
     print_earthquake_table("地震测定报 (USGS)", rows, source_label)
@@ -675,6 +738,7 @@ def process_generic_eew(data, source_key, source_label, data_type):
     rows.append(["坐标", f"{lat}, {lon}" if lat and lon else '未知'])
     rows.append(["震级(M)", safe_get(data, 'magnitude', 'Magunitude')])
     rows.append(["深度(km)", safe_get(data, 'depth', 'Depth')])
+    rows.append(["最大震度/烈度", get_intensity_display(data, 'cenc')])
 
     print_earthquake_table(f"地震报告 ({data_type})", rows, source_label)
 
@@ -697,6 +761,13 @@ def process_eew(data, source_key, default_type=None):
     if source_key == 'fan':
         source_label = f"{SOURCE_DISPLAY['fan']} ({data_type})"
         process_fan_data(data, data_type, source_label)
+        return
+    elif source_key == 'p2pjson':
+        source_label = SOURCE_DISPLAY.get(source_key, source_key)
+        if data_type == 'jma':
+            process_jma_eew(data, source_key, source_label)
+        else:
+            process_generic_eew(data, source_key, source_label, data_type)
         return
 
     source_label = SOURCE_DISPLAY.get(source_key, source_key)
@@ -740,6 +811,215 @@ def process_eew(data, source_key, default_type=None):
             console.print(f"[dim]未处理的类型: {data_type} 来自 {source_key}[/dim]")
 
 
+# ---------- P2P JSON API 专用处理函数 ----------
+def process_p2p_quake(data):
+    """
+    处理 P2P JSON API 的地震信息 (code=551)
+    支持两种数据来源：
+    1. WebSocket 推送：顶层包含 id, issue, earthquake, points 等
+    2. 历史接口：顶层也是完整的 JMAQuake 对象
+    """
+    try:
+        # 从顶层提取基本字段
+        quake_id = data.get('id') or data.get('_id')
+        if not quake_id:
+            if DEBUG:
+                console.print("[dim]P2P 地震信息缺少 id，跳过[/dim]")
+            return
+
+        # 去重（基于 id）
+        if quake_id in processed_events:
+            if DEBUG:
+                console.print(f"[dim]P2P 地震信息已处理过 (id={quake_id})，跳过[/dim]")
+            return
+        processed_events.add(quake_id)
+
+        # 提取 issue 和 earthquake
+        issue = data.get('issue', {})
+        earthquake = data.get('earthquake', {})
+        issue_type = issue.get('type', '')
+
+        # 提取震源信息
+        hypocenter = earthquake.get('hypocenter', {})
+        max_scale = earthquake.get('maxScale', -1)
+        max_intensity = scale_to_jma(max_scale)
+
+        # 发震时刻：优先用 earthquake.time，否则用顶层 time
+        origin_time = earthquake.get('time') or data.get('time', '')
+
+        # 构建通用字段
+        rows = []
+        rows.append(["发震时刻", origin_time])
+        rows.append(["震中位置", hypocenter.get('name', '未知')])
+        lat = hypocenter.get('latitude')
+        lon = hypocenter.get('longitude')
+        if lat and lon and lat != -200 and lon != -200:
+            rows.append(["坐标", f"{lat}, {lon}"])
+        else:
+            rows.append(["坐标", "不明"])
+        rows.append(["震级(M)", hypocenter.get('magnitude', -1)])
+        rows.append(["深度(km)", hypocenter.get('depth', 'N/A')])
+
+        # 处理不同类型的 551 消息
+        if issue_type == 'ScalePrompt':
+            # 震度速报：无震源详细信息，但有 points 区域列表
+            rows.append(["最大震度", max_intensity])
+            rows.append(["信息类型", "震度速报 (ScalePrompt)"])
+            rows.append(["発表元", issue.get('source', 'N/A')])
+            rows.append(["発表時刻", issue.get('time', 'N/A')])
+
+            # 显示受影响区域
+            points = data.get('points', [])
+            if points:
+                area_list = []
+                for p in points[:10]:  # 最多显示10条
+                    pref = p.get('pref', '')
+                    addr = p.get('addr', '')
+                    scale = scale_to_jma(p.get('scale', -1))
+                    area_list.append(f"{pref} {addr} (震度{scale})")
+                if len(points) > 10:
+                    area_list.append(f"... 共 {len(points)} 个区域")
+                rows.append(["受影响区域", '\n'.join(area_list)])
+            else:
+                rows.append(["受影响区域", "无"])
+
+            title = "P2P 震度速报 (ScalePrompt)"
+
+        elif issue_type in ('DetailScale', 'ScaleAndDestination', 'Destination'):
+            # 详细地震信息
+            rows.append(["最大震度", max_intensity])
+            rows.append(["信息类型", issue_type])
+            rows.append(["発表元", issue.get('source', 'N/A')])
+            rows.append(["発表時刻", issue.get('time', 'N/A')])
+
+            # 显示观测点震度列表
+            points = data.get('points', [])
+            if points:
+                area_list = []
+                for p in points[:10]:
+                    pref = p.get('pref', '')
+                    addr = p.get('addr', '')
+                    scale = scale_to_jma(p.get('scale', -1))
+                    area_list.append(f"{pref} {addr} (震度{scale})")
+                if len(points) > 10:
+                    area_list.append(f"... 共 {len(points)} 个观测点")
+                rows.append(["震度观测点", '\n'.join(area_list)])
+            else:
+                rows.append(["震度观测点", "无"])
+
+            # 津波信息
+            domestic = earthquake.get('domesticTsunami', '')
+            foreign = earthquake.get('foreignTsunami', '')
+            if domestic:
+                rows.append(["国内津波", domestic])
+            if foreign:
+                rows.append(["海外津波", foreign])
+
+            title = "P2P 地震情報 (JMA)"
+
+        else:
+            # 其他类型（如 Foreign 等），通用处理
+            rows.append(["最大震度", max_intensity])
+            rows.append(["信息类型", issue_type or "不明"])
+            rows.append(["発表元", issue.get('source', 'N/A')])
+            rows.append(["発表時刻", issue.get('time', 'N/A')])
+            title = f"P2P 地震情報 ({issue_type or 'Unknown'})"
+
+        print_earthquake_table(title, rows, "P2P JSON API")
+        play_sound(SOUND_ALERT, is_nhk=False)
+
+    except Exception as e:
+        console.print(f"[red]P2P 地震处理异常: {e}[/red]")
+
+
+def process_p2p_tsunami(data):
+    """处理 P2P JSON API 的海啸预报 (code=552)"""
+    try:
+        if data.get('cancelled', False):
+            console.print("[yellow]P2P 海啸预报已取消[/yellow]")
+            return
+        issue = data.get('issue', {})
+        areas = data.get('areas', [])
+        rows = []
+        rows.append(["発表元", issue.get('source', 'N/A')])
+        rows.append(["発表時刻", issue.get('time', 'N/A')])
+        if not areas:
+            rows.append(["予報区", "なし"])
+        else:
+            for area in areas:
+                grade = area.get('grade', 'Unknown')
+                name = area.get('name', '')
+                immediate = area.get('immediate', False)
+                max_height = area.get('maxHeight', {})
+                height_desc = max_height.get('description', 'N/A')
+                rows.append(["種別", grade])
+                rows.append(["予報区", name])
+                rows.append(["直ちに来襲", "はい" if immediate else "いいえ"])
+                rows.append(["最大波高", height_desc])
+        print_earthquake_table("P2P 津波予報", rows, "P2P JSON API")
+        play_sound(SOUND_ALERT, is_nhk=False)
+    except Exception as e:
+        console.print(f"[red]P2P 海啸解析错误: {e}[/red]")
+
+
+def process_p2p_eew(data):
+    """处理 P2P JSON API 的紧急地震速报 (code=556)"""
+    try:
+        if data.get('cancelled', False):
+            console.print("[yellow]P2P 紧急地震速报已取消[/yellow]")
+            return
+        quake = data.get('earthquake', {})
+        issue = data.get('issue', {})
+        areas = data.get('areas', [])
+        rows = []
+        rows.append(["発表時刻", issue.get('time', 'N/A')])
+        rows.append(["イベントID", issue.get('eventId', 'N/A')])
+        rows.append(["連番", issue.get('serial', 'N/A')])
+        rows.append(["テスト", "はい" if data.get('test', False) else "いいえ"])
+
+        if quake:
+            hypocenter = quake.get('hypocenter', {})
+            rows.append(["発震時刻", quake.get('originTime', 'N/A')])
+            rows.append(["到達時刻", quake.get('arrivalTime', 'N/A')])
+            rows.append(["震央地名", hypocenter.get('name', 'N/A')])
+            rows.append(["短縮地名", hypocenter.get('reduceName', 'N/A')])
+            rows.append(["緯度", hypocenter.get('latitude', 'N/A')])
+            rows.append(["経度", hypocenter.get('longitude', 'N/A')])
+            rows.append(["深さ(km)", hypocenter.get('depth', 'N/A')])
+            rows.append(["マグニチュード", hypocenter.get('magnitude', 'N/A')])
+        else:
+            rows.append(["地震情報", "なし"])
+
+        if areas:
+            for area in areas:
+                pref = area.get('pref', '')
+                name = area.get('name', '')
+                scale_from = scale_to_jma(area.get('scaleFrom', -1))
+                scale_to = scale_to_jma(area.get('scaleTo', -1))
+                kind = area.get('kindCode', '')
+                rows.append([f"地域: {pref} {name}", f"予測震度: {scale_from}～{scale_to} (種別:{kind})"])
+        else:
+            rows.append(["予測地域", "なし"])
+
+        print_earthquake_table("P2P 緊急地震速報", rows, "P2P JSON API")
+        play_sound(SOUND_NHK, is_nhk=True)
+    except Exception as e:
+        console.print(f"[red]P2P EEW 解析错误: {e}[/red]")
+
+
+def process_p2p_userquake(data):
+    """处理 P2P JSON API 的地震感知情報 (code=561)"""
+    try:
+        area_code = data.get('area', -1)
+        rows = []
+        rows.append(["地域コード", str(area_code)])
+        rows.append(["受信時刻", data.get('time', 'N/A')])
+        print_earthquake_table("P2P 地震感知情報", rows, "P2P JSON API")
+        play_sound(SOUND_ALERT, is_nhk=False)
+    except Exception as e:
+        console.print(f"[red]P2P 感知情報解析错误: {e}[/red]")
+
+
 # ---------- 气象预警 ----------
 def process_weather_warning(data, source_key):
     try:
@@ -779,31 +1059,15 @@ def fetch_initial_snapshots():
         except Exception:
             pass
 
+    # 从 P2P JSON API 获取快照
     try:
-        p2p_url = "https://api.p2pquake.net/v2/history?codes=551&limit=1"
-        response = requests.get(p2p_url, timeout=5)
+        p2pjson_url = "https://api.p2pquake.net/v2/history?codes=551&limit=3"
+        response = requests.get(p2pjson_url, timeout=5)
         if response.status_code == 200:
             data = response.json()
-            if data and isinstance(data, list) and len(data) > 0:
-                quake = data[0]
-                eq_data = quake.get("earthquake", {})
-                hypocenter = eq_data.get("hypocenter", {})
-                converted = {
-                    "type": "jma",
-                    "EventID": quake.get("id", ""),
-                    "OriginTime": eq_data.get("time", ""),
-                    "Hypocenter": hypocenter.get("name", "未知地区"),
-                    "Magunitude": hypocenter.get("magnitude", -1),
-                    "Depth": hypocenter.get("depth", "N/A"),
-                    "MaxIntensity": scale_to_jma(eq_data.get("maxScale", 0)),
-                    "Latitude": hypocenter.get("latitude"),
-                    "Longitude": hypocenter.get("longitude"),
-                    "isFinal": True,
-                    "Accuracy": {},
-                    "WarnArea": []
-                }
-                if converted["Magunitude"] != -1:
-                    process_eew(converted, 'p2p')
+            if isinstance(data, list):
+                for quake in data[:3]:
+                    process_p2p_quake(quake)
     except Exception:
         pass
 
@@ -826,7 +1090,7 @@ def scale_to_jma(scale_code):
     return scale_map.get(scale_code, "不明")
 
 
-# ---------- EPSPClient ----------
+# ---------- EPSPClient (已弃用，保留但不启动) ----------
 class EPSPClient:
     def __init__(self):
         self.servers = ['www.p2pquake.net', 'p2pquake.info', 'p2pquake.xyz', 'p2pquake.ddo.jp']
@@ -834,7 +1098,7 @@ class EPSPClient:
         self.running = True
         self.sock = None
         self.peer_id = None
-        self.region_code = 250
+        self.region_code = 901
         self.connected_peers = {}
         self.lock = threading.Lock()
         self.server_index = 0
@@ -844,342 +1108,138 @@ class EPSPClient:
         self.max_connections = 20
 
     def start(self):
-        self._start_listener()
-        threading.Thread(target=self._run, daemon=True).start()
+        pass
 
-    def _start_listener(self):
-        try:
-            self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.listener.bind(('0.0.0.0', 6911))
-            self.listener.listen(5)
-            self.listener_thread = threading.Thread(target=self._listener_loop, daemon=True)
-            self.listener_thread.start()
+
+# ---------- P2P JSON API v2 WebSocket ----------
+def on_p2pjson_message(ws, message):
+    if not SOURCE_CONFIG.get('p2pjson', {}).get('enabled', True):
+        return
+    try:
+        data = json.loads(message)
+        if DEBUG:
+            console.print(f"[dim]P2P JSON 原始数据: {data}[/dim]")
+
+        # 标记连接成功（如果尚未标记）
+        if ws_status.get('p2pjson') != 'connected':
+            msg_type = data.get('type')
+            if msg_type not in ('heartbeat', 'error', 'pong'):
+                console.print("[green]P2P JSON API 已连接并接收数据[/green]")
+                ws_status['p2pjson'] = 'connected'
+
+        # 处理基于 type 的消息
+        if 'type' in data:
+            msg_type = data['type']
+            if msg_type == 'welcome':
+                console.print("[green]P2P JSON API 已连接[/green]")
+                ws_status['p2pjson'] = 'connected'
+            elif msg_type == 'heartbeat':
+                if DEBUG:
+                    console.print("[dim]P2P JSON 心跳[/dim]")
+            elif msg_type == 'error':
+                console.print(f"[red]P2P JSON 错误: {data.get('message', '未知错误')}[/red]")
+            elif msg_type == 'earthquake':
+                quake = data.get('earthquake', {})
+                if quake:
+                    # 构建完整对象传递给 process_p2p_quake
+                    full_quake = {
+                        'id': data.get('id'),
+                        '_id': data.get('id'),
+                        'earthquake': quake,
+                        'issue': data.get('issue', {}),
+                        'points': data.get('points', []),
+                        'time': data.get('time', ''),
+                        'comments': data.get('comments', {})
+                    }
+                    process_p2p_quake(full_quake)
+            else:
+                if DEBUG:
+                    console.print(f"[dim]未知 P2P JSON 消息类型: {msg_type}[/dim]")
+        # 处理基于 code 的消息
+        elif 'code' in data:
+            code = data.get('code')
+            if code == 551:
+                if DEBUG:
+                    console.print("[dim]收到 P2P 地震信息 (code=551)[/dim]")
+                # 直接传递整个 data 对象
+                process_p2p_quake(data)
+            elif code == 552:
+                if DEBUG:
+                    console.print("[dim]收到 P2P 海啸预报 (code=552)[/dim]")
+                process_p2p_tsunami(data)
+            elif code == 555:
+                if DEBUG:
+                    console.print("[dim]收到 P2P 感知信息/节点分布 (code=555)[/dim]")
+            elif code == 556:
+                if DEBUG:
+                    console.print("[dim]收到 P2P 紧急地震速报 (code=556)[/dim]")
+                process_p2p_eew(data)
+            elif code == 561:
+                if DEBUG:
+                    console.print("[dim]收到 P2P 地震感知情報 (code=561)[/dim]")
+                process_p2p_userquake(data)
+            else:
+                if DEBUG:
+                    console.print(f"[dim]收到 P2P 未处理 code={code}[/dim]")
+        else:
             if DEBUG:
-                console.print("[dim]端口 6911 监听已启动[/dim]")
-        except Exception as e:
-            if DEBUG:
-                console.print(f"[red]无法启动端口监听 (6911): {e}[/red]")
+                console.print("[dim]P2P JSON 未知格式消息[/dim]")
+    except json.JSONDecodeError as e:
+        console.print(f"[red]P2P JSON 解析错误: {e}[/red]")
+    except Exception as e:
+        console.print(f"[red]P2P JSON 处理异常: {e}[/red]")
 
-    def _listener_loop(self):
-        while self.running:
-            try:
-                client, addr = self.listener.accept()
-                client.close()
-                if DEBUG:
-                    console.print(f"[dim]收到连接检查请求，已关闭[/dim]")
-            except Exception:
-                break
 
-    def _run(self):
-        while self.running:
-            host = self.servers[self.server_index % len(self.servers)]
-            if DEBUG:
-                console.print(f"[dim]尝试连接 P2PQuake (EPSP) 服务器: {host}:{self.port}[/dim]")
-            try:
-                self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                self.sock.settimeout(10)
-                self.sock.connect((host, self.port))
-                if DEBUG:
-                    console.print(f"[dim]已连接到 {host}:{self.port}[/dim]")
-                self._send("131 1 0.38:EEW_CLI:2.0")
-                if DEBUG:
-                    console.print("[dim]发送协议版本: 131 1 0.38:EEW_CLI:2.0[/dim]")
-                self._receive_loop()
-                break
-            except socket.timeout:
-                if DEBUG:
-                    console.print(f"[red]连接 {host} 超时[/red]")
-                self.server_index += 1
-                time.sleep(3)
-            except Exception as e:
-                if DEBUG:
-                    console.print(f"[red]连接 {host} 失败: {e}[/red]")
-                self.server_index += 1
-                time.sleep(3)
-        if not self.running:
-            console.print("[red]P2PQuake (EPSP) 连接失败，已放弃[/red]")
+def on_p2pjson_error(ws, error):
+    if "429" in str(error):
+        console.print("[red]P2P JSON 请求过于频繁 (429)，已启动退避重连[/red]")
+    else:
+        console.print(f"[red]P2P JSON WebSocket 错误: {error}[/red]")
 
-    def _send(self, msg):
-        if self.sock:
-            try:
-                full_msg = msg + "\r\n"
-                self.sock.send(full_msg.encode('shift-jis'))
-                if DEBUG:
-                    console.print(f"[dim]发送: {msg}[/dim]")
-            except Exception as e:
-                console.print(f"[red]发送失败: {e}[/red]")
 
-    def _send_connected_peers(self, peer_ids):
-        if peer_ids:
-            data = ":".join(peer_ids)
-            self._send(f"155 1 {data}")
-            if DEBUG:
-                console.print(f"[dim]发送 155 已连接节点: {data}[/dim]")
+def on_p2pjson_close(ws, close_status_code, close_msg):
+    global p2pjson_reconnect_delay
+    console.print("[yellow]P2P JSON 连接已关闭[/yellow]")
+    if ws_running and SOURCE_CONFIG.get('p2pjson', {}).get('enabled', True):
+        delay = p2pjson_reconnect_delay
+        console.print(f"[dim]将在 {delay} 秒后尝试重连[/dim]")
+        threading.Timer(delay, start_p2pjson_websocket).start()
+        p2pjson_reconnect_delay = min(p2pjson_reconnect_delay * 2, 300)
 
-    def _receive_loop(self):
-        while self.running:
-            try:
-                data = self.sock.recv(4096)
-                if not data:
-                    if DEBUG:
-                        console.print("[yellow]服务器关闭连接[/yellow]")
-                    break
-                self.recv_buffer += data.decode('shift-jis', errors='ignore')
-                if DEBUG:
-                    console.print(f"[dim]原始数据: {data[:200]}[/dim]")
-                while '\r\n' in self.recv_buffer:
-                    line, self.recv_buffer = self.recv_buffer.split('\r\n', 1)
-                    if line.strip():
-                        if DEBUG:
-                            console.print(f"[dim]收到: {line}[/dim]")
-                        self._handle_line(line)
-            except socket.timeout:
-                continue
-            except Exception as e:
-                console.print(f"[red]接收错误: {e}[/red]")
-                break
-        if self.running:
-            console.print("[yellow]P2PQuake (EPSP) 连接已关闭，5秒后重连...[/yellow]")
-            self.server_index += 1
+
+def on_p2pjson_open(ws):
+    global p2pjson_reconnect_delay
+    p2pjson_reconnect_delay = 5
+    console.print("[green]P2P JSON WebSocket 已连接，正在订阅...[/green]")
+    subscribe_msg = '{"type":"subscribe","topic":"all"}'
+    ws.send(subscribe_msg)
+    if DEBUG:
+        console.print(f"[dim]发送订阅: {subscribe_msg}[/dim]")
+
+
+def start_p2pjson_websocket():
+    if not WS_AVAILABLE:
+        console.print("[red]websocket-client 未安装，无法启动 P2P JSON[/red]")
+        return
+    if not SOURCE_CONFIG.get('p2pjson', {}).get('enabled', True):
+        return
+    url = SOURCE_CONFIG['p2pjson']['url']
+    try:
+        websocket.enableTrace(False)
+        ws = websocket.WebSocketApp(
+            url,
+            on_open=on_p2pjson_open,
+            on_message=on_p2pjson_message,
+            on_error=on_p2pjson_error,
+            on_close=on_p2pjson_close
+        )
+        ws_connections['p2pjson'] = ws
+        ws.run_forever()
+    except Exception as e:
+        console.print(f"[red]P2P JSON WebSocket 启动失败: {e}[/red]")
+        if ws_running:
             time.sleep(5)
-            self._run()
-
-    def _handle_line(self, line):
-        try:
-            parts = line.split(' ', 2)
-            if len(parts) < 3:
-                if DEBUG:
-                    console.print(f"[dim]忽略格式错误行: {line}[/dim]")
-                return
-            code = parts[0]
-            hop = parts[1]
-            data = parts[2] if len(parts) > 2 else ''
-            if DEBUG:
-                console.print(f"[dim]处理代码 {code}, 数据: {data[:50]}[/dim]")
-
-            if code == '295':
-                if DEBUG:
-                    console.print("[dim]服务器返回 295（密钥已分配），忽略[/dim]")
-                return
-            if code == '212':
-                if DEBUG:
-                    console.print(f"[dim]服务器版本: {data}[/dim]")
-                self._send("113 1")
-            elif code == '233':
-                self.peer_id = data
-                if DEBUG:
-                    console.print(f"[dim]临时ID: {self.peer_id}[/dim]")
-                self._send(f"115 1 {self.peer_id}")
-            elif code == '235':
-                if DEBUG:
-                    console.print(f"[dim]收到节点列表，长度: {len(data)}[/dim]")
-                self._connect_to_peers(data)
-                current_conn = len(self.connected_peers)
-                self._send(f"116 1 {self.peer_id}:6911:{self.region_code}:{current_conn}:{self.max_connections}")
-                if DEBUG:
-                    console.print(f"[dim]发送 116: {self.peer_id}:6911:{self.region_code}:{current_conn}:{self.max_connections}[/dim]")
-            elif code == '236':
-                console.print(f"[green]P2PQuake (EPSP) 已连接 (总节点数: {data})[/green]")
-                ws_status['p2p'] = 'connected'
-                self._send("127 1")
-                self._send("118 1")
-                self._send(f"117 1 {self.peer_id}")
-            elif code == '237':
-                if DEBUG:
-                    console.print("[dim]收到密钥[/dim]")
-            elif code == '247':
-                if DEBUG:
-                    console.print("[dim]收到地域ピア数[/dim]")
-            elif code == '238':
-                if DEBUG:
-                    console.print("[dim]收到协议时间[/dim]")
-            elif code == '551':
-                self._handle_earthquake_data(data)
-            elif code == '552':
-                self._handle_tsunami_data(data)
-            elif code == '555':
-                self._handle_sensor_data(data)
-            elif code == '561':
-                self._handle_peer_count_data(data)
-            elif code == '299':
-                console.print("[red]P2PQuake (EPSP) IP 变化，重新连接[/red]")
-                self.sock.close()
-                self.server_index += 1
-                self._run()
-                return
-            elif code == '298':
-                if DEBUG:
-                    console.print("[dim]收到协议警告 (298)，忽略[/dim]")
-            else:
-                if DEBUG:
-                    console.print(f"[dim]忽略代码 {code}[/dim]")
-        except Exception as e:
-            console.print(f"[red]处理消息错误: {e}[/red]")
-
-    def _connect_to_peers(self, peer_data):
-        peers = peer_data.strip().split(':')
-        connected_ids = []
-        for peer_info in peers:
-            peer_info = peer_info.strip()
-            if not peer_info:
-                continue
-            try:
-                parts = peer_info.split(',')
-                if len(parts) >= 3:
-                    ip = parts[0].strip()
-                    port = int(parts[1].strip())
-                    pid = parts[2].strip()
-                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    sock.settimeout(1)
-                    sock.connect((ip, port))
-                    sock.send(b"614 1 0.38:EEW_CLI:2.0\r\n")
-                    response = sock.recv(1024).decode('shift-jis', errors='ignore')
-                    if response.startswith('634'):
-                        sock.send(b"612 1\r\n")
-                        id_response = sock.recv(1024).decode('shift-jis', errors='ignore')
-                        if id_response.startswith('632'):
-                            their_id = id_response.split(' ', 2)[2].strip()
-                            with self.lock:
-                                self.connected_peers[their_id] = sock
-                                connected_ids.append(their_id)
-                        else:
-                            sock.close()
-                    else:
-                        sock.close()
-                else:
-                    if DEBUG:
-                        console.print(f"[dim]忽略格式错误节点: {peer_info}[/dim]")
-            except Exception as e:
-                if DEBUG:
-                    console.print(f"[dim]连接节点 {peer_info} 失败: {e}[/dim]")
-        if connected_ids:
-            self._send_connected_peers(connected_ids)
-
-    def _handle_earthquake_data(self, data):
-        try:
-            parts = data.split(':', 3)
-            if len(parts) < 4:
-                return
-            signature, expiry, summary, detail = parts
-            summary_parts = summary.split(',')
-            while len(summary_parts) < 12:
-                summary_parts.append('N/A')
-            origin_time = summary_parts[0]
-            intensity = summary_parts[1]
-            tsunami = summary_parts[2]
-            info_type = summary_parts[3]
-            source = summary_parts[4]
-            depth = summary_parts[5]
-            mag = summary_parts[6]
-            correction = summary_parts[7]
-            lat_dir = summary_parts[8]
-            lat_val = summary_parts[9] if len(summary_parts) > 9 else ''
-            lon_dir = summary_parts[10] if len(summary_parts) > 10 else ''
-            lon_val = summary_parts[11] if len(summary_parts) > 11 else ''
-
-            earthquake_data = {
-                "type": "jma",
-                "EventID": f"P2P_{int(time.time())}",
-                "OriginTime": origin_time.replace('頃', ''),
-                "Hypocenter": source,
-                "Magunitude": mag,
-                "Depth": depth,
-                "MaxIntensity": intensity,
-                "isFinal": True,
-                "Latitude": self._parse_latlon(lat_dir, lat_val),
-                "Longitude": self._parse_latlon(lon_dir, lon_val)
-            }
-            process_eew(earthquake_data, 'p2p')
-        except Exception as e:
-            console.print(f"[red]解析地震数据失败: {e}[/red]")
-
-    def _handle_tsunami_data(self, data):
-        try:
-            parts = data.split(':', 2)
-            if len(parts) < 3:
-                return
-            signature, expiry, detail = parts
-            items = detail.split(',')
-            rows = [["項目", "情報"]]
-            rows.append(["種別", "海嘯預警"])
-            for item in items:
-                if item.startswith('-'):
-                    rows.append(["予報種類", item[1:]])
-                elif item.startswith('+') or item.startswith('*'):
-                    rows.append(["予報区", item[1:]])
-                elif item == "解除":
-                    rows.append(["解除", "津波注意報等が解除されました"])
-            table = Table(title="海嘯預警 (P2PQuake)", box=box.ROUNDED, border_style="bold red")
-            table.add_column("項目", style="cyan", no_wrap=True, width=12)
-            table.add_column("情報", style="white", no_wrap=False, width=48)
-            for row in rows[1:]:
-                table.add_row(row[0], row[1])
-            console.print(table)
-            write_table_to_csv("海嘯預警 (P2PQuake)", rows[1:])
-            play_sound(SOUND_ALERT, is_nhk=False)
-        except Exception as e:
-            console.print(f"[red]解析海嘯數據失敗: {e}[/red]")
-
-    def _handle_sensor_data(self, data):
-        try:
-            parts = data.split(':', 5)
-            if len(parts) < 6:
-                return
-            sensor_info = parts[5]
-            console.print(f"[dim]收到地震感知情報: {sensor_info}[/dim]")
-        except Exception as e:
-            console.print(f"[red]解析感知情報失敗: {e}[/red]")
-
-    def _handle_peer_count_data(self, data):
-        try:
-            parts = data.split(':', 2)
-            if len(parts) < 3:
-                return
-            signature, expiry, peer_data = parts
-            items = peer_data.split(';')
-            eew_found = False
-            for item in items:
-                if ',' in item:
-                    code, count = item.split(',')
-                    if code == '950':
-                        console.print("[bold red]緊急地震速報（警報）が発表されました！[/bold red]")
-                        play_sound(SOUND_NHK, is_nhk=True)
-                        eew_found = True
-                    elif code == '951':
-                        console.print("[bold yellow]緊急地震速報（配信試験）[/bold yellow]")
-                        eew_found = True
-                    elif code == '952':
-                        console.print("[bold red]緊急地震速報（警報）部分配信[/bold red]")
-                        play_sound(SOUND_NHK, is_nhk=True)
-                        eew_found = True
-                    elif code == '953':
-                        console.print("[bold yellow]緊急地震速報（テスト）部分配信[/bold yellow]")
-                        eew_found = True
-                    elif code == '954':
-                        console.print("[bold blue]緊急地震速報（警報）取消[/bold blue]")
-                        eew_found = True
-                    elif code == '955':
-                        console.print("[bold cyan]緊急地震速報（続報）[/bold cyan]")
-                        eew_found = True
-            if not eew_found and DEBUG:
-                console.print(f"[dim]各地域ピア数: {peer_data[:100]}[/dim]")
-        except Exception as e:
-            console.print(f"[red]解析ピア数失敗: {e}[/red]")
-
-    def _parse_latlon(self, direction, value):
-        if not value or value == '-1' or value == 'N/A':
-            return None
-        try:
-            val = float(value)
-            if direction == 'N' or direction == 'E':
-                return val
-            elif direction == 'S' or direction == 'W':
-                return -val
-            else:
-                return val
-        except:
-            return None
+            start_p2pjson_websocket()
 
 
 # ---------- NIED WebSocket ----------
@@ -1306,6 +1366,10 @@ def on_fan_message(ws, message):
                     continue
                 if isinstance(sub_data, dict) and 'Data' in sub_data:
                     if sub_key == 'weatheralarm':
+                        # 处理气象预警
+                        item_data = sub_data.get('Data')
+                        if item_data and isinstance(item_data, dict):
+                            process_weather_warning(item_data, 'fan')
                         continue
                     if sub_key == 'tsunami':
                         item_data = sub_data.get('Data')
@@ -1328,6 +1392,9 @@ def on_fan_message(ws, message):
             source = data.get('source')
             if source:
                 if source == 'weatheralarm':
+                    item_data = data.get('Data')
+                    if item_data and isinstance(item_data, dict):
+                        process_weather_warning(item_data, 'fan')
                     return
                 elif source == 'tsunami':
                     item_data = data.get('Data')
@@ -1368,13 +1435,7 @@ def on_fan_close(ws, close_status_code, close_msg):
     fan_last_reconnect_time = time.time()
     if ws_running and SOURCE_CONFIG.get('fan', {}).get('enabled', True):
         console.print(f"[dim]FAN 将在 {FAN_RECONNECT_DELAY // 60} 分钟后尝试重连[/dim]")
-
-        def delayed_connect():
-            time.sleep(FAN_RECONNECT_DELAY)
-            if ws_running and SOURCE_CONFIG.get('fan', {}).get('enabled', True):
-                start_fan_websocket()
-
-        threading.Thread(target=delayed_connect, daemon=True).start()
+        threading.Timer(FAN_RECONNECT_DELAY, start_fan_websocket).start()
 
 
 def on_fan_open(ws):
@@ -1412,88 +1473,6 @@ def start_fan_websocket():
         if ws_running:
             fan_last_reconnect_time = time.time()
             threading.Timer(FAN_RECONNECT_DELAY, start_fan_websocket).start()
-
-
-# ---------- FAN Weather ----------
-def on_fanw_message(ws, message):
-    if not SOURCE_CONFIG.get('fanw', {}).get('enabled', True):
-        return
-    try:
-        data = json.loads(message)
-        if DEBUG:
-            console.print(f"[dim]FAN Weather 原始数据: {data}[/dim]")
-        if 'Data' in data:
-            weather_data = data.get('Data', {})
-            if weather_data:
-                process_weather_warning(weather_data, 'fanw')
-        else:
-            msg_type = data.get('type')
-            if msg_type == 'welcome':
-                console.print("[green]FAN Weather 已连接[/green]")
-                ws_status['fanw'] = 'connected'
-            elif msg_type == 'heartbeat':
-                if DEBUG:
-                    console.print("[dim]FAN Weather 心跳[/dim]")
-    except json.JSONDecodeError as e:
-        console.print(f"[red]FAN Weather JSON 解析错误: {e}[/red]")
-    except Exception as e:
-        console.print(f"[red]FAN Weather 处理异常: {e}[/red]")
-
-
-def on_fanw_error(ws, error):
-    console.print(f"[red]FAN Weather WebSocket 错误: {error}[/red]")
-
-
-def on_fanw_close(ws, close_status_code, close_msg):
-    global fanw_last_reconnect_time
-    console.print("[yellow]FAN Weather 连接已关闭[/yellow]")
-    fanw_last_reconnect_time = time.time()
-    if ws_running and SOURCE_CONFIG.get('fanw', {}).get('enabled', True):
-        console.print(f"[dim]FAN Weather 将在 {FANW_RECONNECT_DELAY // 60} 分钟后尝试重连[/dim]")
-
-        def delayed_connect():
-            time.sleep(FANW_RECONNECT_DELAY)
-            if ws_running and SOURCE_CONFIG.get('fanw', {}).get('enabled', True):
-                start_fanw_websocket()
-
-        threading.Thread(target=delayed_connect, daemon=True).start()
-
-
-def on_fanw_open(ws):
-    console.print("[green]FAN Weather 已连接[/green]")
-    ws_status['fanw'] = 'connected'
-
-
-def start_fanw_websocket():
-    global fanw_last_reconnect_time
-    if not WS_AVAILABLE:
-        console.print("[red]websocket-client 未安装，无法启动 FAN Weather[/red]")
-        return
-    if not SOURCE_CONFIG.get('fanw', {}).get('enabled', True):
-        return
-    elapsed = time.time() - fanw_last_reconnect_time
-    if elapsed < FANW_RECONNECT_DELAY and fanw_last_reconnect_time > 0:
-        remaining = int(FANW_RECONNECT_DELAY - elapsed)
-        console.print(f"[yellow]FAN Weather 重连冷却中，剩余 {remaining // 60} 分钟[/yellow]")
-        return
-    url = SOURCE_CONFIG['fanw']['url']
-    try:
-        websocket.enableTrace(False)
-        ws = websocket.WebSocketApp(
-            url,
-            on_open=on_fanw_open,
-            on_message=on_fanw_message,
-            on_error=on_fanw_error,
-            on_close=on_fanw_close
-        )
-        ws_connections['fanw'] = ws
-        fanw_last_reconnect_time = 0
-        ws.run_forever()
-    except Exception as e:
-        console.print(f"[red]FAN Weather WebSocket 启动失败: {e}[/red]")
-        if ws_running:
-            fanw_last_reconnect_time = time.time()
-            threading.Timer(FANW_RECONNECT_DELAY, start_fanw_websocket).start()
 
 
 # ---------- Wolfx WebSocket (已禁用，保留占位) ----------
@@ -1600,12 +1579,12 @@ def handle_command(cmd):
         console.print(f"[green]{target} 已启用，正在连接...[/green]")
         if target == 'p2p':
             epsp_client.start()
+        elif target == 'p2pjson':
+            threading.Thread(target=start_p2pjson_websocket, daemon=True).start()
         elif target == 'nied':
             threading.Thread(target=start_nied_websocket, daemon=True).start()
         elif target == 'fan':
             threading.Thread(target=start_fan_websocket, daemon=True).start()
-        elif target == 'fanw':
-            threading.Thread(target=start_fanw_websocket, daemon=True).start()
         else:
             threading.Thread(target=start_websocket, args=(target,), daemon=True).start()
         return True
@@ -1616,7 +1595,7 @@ def handle_command(cmd):
         console.print("  debug [on|off]                - 开启/关闭调试模式")
         console.print("  export on/off                 - 开启/关闭表格导出到CSV")
         console.print("  export path <文件路径>        - 设置导出文件路径（相对路径）")
-        console.print("  stop <source>                 - 停用数据源 (wolfx/p2p/nied/fan/fanw/all)")
+        console.print("  stop <source>                 - 停用数据源 (wolfx/p2p/p2pjson/nied/fan/all)")
         console.print("  stop <source>/<subtype>       - 停用子源 (如 stop fan/cenc)")
         console.print("  stop <source>/all             - 停用该数据源所有子源 (如 stop fan/all)")
         console.print("  enable <source>               - 启用数据源")
@@ -1670,13 +1649,11 @@ def handle_command(cmd):
                 console.print("[yellow]用法: export path <文件路径>[/yellow]")
                 return
             raw_path = parts[2]
-            # 如果是相对路径，转换为基于程序所在目录的绝对路径
             if not os.path.isabs(raw_path):
                 prog_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
                 EXPORT_FILE_PATH = os.path.join(prog_dir, raw_path)
             else:
                 EXPORT_FILE_PATH = raw_path
-            # 保存配置
             config = load_config()
             config['export_path'] = EXPORT_FILE_PATH
             save_config(config)
@@ -1783,8 +1760,16 @@ def handle_command(cmd):
             },
             'p2p': {
                 'name': 'P2PQuake (EPSP)',
-                'enabled': True,
+                'enabled': False,
                 'type': 'jma_only'
+            },
+            'p2pjson': {
+                'name': 'P2PQuake (JSON API v2)',
+                'url': 'wss://api.p2pquake.net/v2/ws',
+                'enabled': True,
+                'type': 'websocket',
+                'need_subscribe': True,
+                'subscribe_msg': '{"type":"subscribe","topic":"all"}'
             },
             'nied': {
                 'name': 'NIED (日本防灾科学技术研究所)',
@@ -1801,14 +1786,6 @@ def handle_command(cmd):
                 'type': 'all',
                 'need_subscribe': False,
                 'fallback_urls': ['wss://ws.fanstudio.hk/all']
-            },
-            'fanw': {
-                'name': 'FAN Weather (气象预警)',
-                'url': 'wss://ws.fanstudio.tech/weatheralarm',
-                'enabled': True,
-                'type': 'weather',
-                'need_subscribe': False,
-                'fallback_urls': []
             }
         }
         FILTER_DETAIL = {
@@ -1822,6 +1799,7 @@ def handle_command(cmd):
             'p2p': {
                 'jma': True
             },
+            'p2pjson': {},
             'nied': {},
             'fan': {
                 'cea': True,
@@ -1846,13 +1824,11 @@ def handle_command(cmd):
                 'kma-eew': False,
                 'fssn': False,
                 'fssn-cmt': False,
-            },
-            'fanw': {}
+            }
         }
         for sub in FAN_SUBTYPES:
             if sub not in FILTER_DETAIL['fan']:
                 FILTER_DETAIL['fan'][sub] = False
-        # 重置导出路径配置（可选）
         EXPORT_FILE_PATH = None
         save_config({})
         console.print("[dim]导出路径配置已重置[/dim]")
@@ -1979,17 +1955,21 @@ def main():
     if not os.path.exists(SOUND_NHK):
         console.print("[yellow]提示: 紧急铃声文件未找到，将无法播放。[/yellow]")
 
-    # 加载持久化配置
     config = load_config()
     if 'export_path' in config:
         EXPORT_FILE_PATH = config['export_path']
         console.print(f"[dim]加载导出路径配置: {EXPORT_FILE_PATH}[/dim]")
 
-    console.print("[cyan]数据源: Wolfx(快照) + P2PQuake(EPSP) + NIED + FAN Studio(地震) + FAN Weather(气象)[/cyan]")
+    console.print("[cyan]数据源: Wolfx(快照) + P2PQuake(JSON API) + NIED + FAN Studio(地震)[/cyan]")
     console.print("[cyan]按 Ctrl+C 退出[/cyan]")
     console.print("[cyan]输入 help 查看命令[/cyan]\n")
 
     fetch_initial_snapshots()
+
+    if SOURCE_CONFIG.get('p2pjson', {}).get('enabled', False):
+        ws_status['p2pjson'] = 'connecting'
+        threading.Thread(target=start_p2pjson_websocket, daemon=True).start()
+        time.sleep(1)
 
     if SOURCE_CONFIG.get('fan', {}).get('enabled', False):
         ws_status['fan'] = 'connecting'
@@ -1999,11 +1979,6 @@ def main():
     if SOURCE_CONFIG.get('nied', {}).get('enabled', False):
         ws_status['nied'] = 'connecting'
         threading.Thread(target=start_nied_websocket, daemon=True).start()
-        time.sleep(1)
-
-    if SOURCE_CONFIG.get('fanw', {}).get('enabled', False):
-        ws_status['fanw'] = 'connecting'
-        threading.Thread(target=start_fanw_websocket, daemon=True).start()
         time.sleep(1)
 
     epsp_client = EPSPClient()
