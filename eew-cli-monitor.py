@@ -52,13 +52,19 @@ def play_sound(file_path, is_nhk=False):
         try:
             winsound.PlaySound(file_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
             nhk_block_until = time.time() + NHK_BLOCK_DURATION
+            if DEBUG:
+                console.print("[dim][DEBUG] 播放NHK铃声[/dim]")
         except Exception:
             pass
     else:
         if time.time() < nhk_block_until:
+            if DEBUG:
+                console.print("[dim][DEBUG] 音频被NHK冷却阻止[/dim]")
             return
         try:
             winsound.PlaySound(file_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+            if DEBUG:
+                console.print("[dim][DEBUG] 播放提示音: alert.wav[/dim]")
         except Exception:
             pass
 
@@ -300,7 +306,8 @@ HTTP_URLS = {
     'cenc': 'https://api.wolfx.jp/cenc_eew.json',
     'sc': 'https://api.wolfx.jp/sc_eew.json',
     'fj': 'https://api.wolfx.jp/fj_eew.json',
-    'cq': 'https://api.wolfx.jp/cq_eew.json'
+    'cq': 'https://api.wolfx.jp/cq_eew.json',
+    'cenc_eqlist': 'https://api.wolfx.jp/cenc_eqlist.json'
 }
 
 FAN_SUBTYPES = [
@@ -320,7 +327,8 @@ FILTER_DETAIL = {
         'cenc': True,
         'sc': False,
         'fj': False,
-        'cq': False
+        'cq': False,
+        'cenc_eqlist': False
     },
     'p2p': {
         'jma': True
@@ -356,14 +364,6 @@ for sub in FAN_SUBTYPES:
     if sub not in FILTER_DETAIL['fan']:
         FILTER_DETAIL['fan'][sub] = False
 
-FILTER_CONFIG = {
-    'jma': True,
-    'cenc': True,
-    'sc': False,
-    'fj': False,
-    'cq': False
-}
-
 # FAN 重连冷却时间：改为 5 分钟
 FAN_RECONNECT_DELAY = 300
 fan_last_reconnect_time = 0
@@ -374,6 +374,13 @@ p2pjson_reconnect_delay = 5
 processed_events = set()
 high_intensity_state = {}
 console = Console()
+_console_print = console.print
+
+def _ts_print(*args, **kwargs):
+    now = datetime.now().strftime("%H:%M:%S")
+    _console_print(f"[dim]{now}[/dim]", *args, **kwargs)
+
+console.print = _ts_print
 ws_running = True
 ws_connections = {}
 ws_status = {}
@@ -574,7 +581,14 @@ def process_jma_eew(data, source_key, source_label):
     rows.append(["深度(km)", safe_get(data, 'Depth', 'depth')])
     rows.append(["最大震度(日本)", max_intensity])
     rows.append(["速报序号", str(serial)])
-    rows.append(["最终报", "是" if data.get('isFinal', False) else "否"])
+    rows.append(["発表時刻", safe_get(data, 'AnnouncedTime', 'announced_time')])
+    issue = data.get('Issue', {})
+    rows.append(["発表機関", issue.get('Source', 'N/A')])
+    rows.append(["発表状態", issue.get('Status', 'N/A')])
+    rows.append(["最終报", "是" if data.get('isFinal', False) else "否"])
+    rows.append(["取消报", "是" if data.get('isCancel', False) else "否"])
+    rows.append(["警报触发", "是" if data.get('isWarn', False) else "否"])
+    rows.append(["海域推定", "是" if data.get('isSea', False) else "否"])
 
     acc = data.get('Accuracy', {})
     rows.append(["震央精度", acc.get('Epicenter', 'N/A')])
@@ -606,13 +620,16 @@ def process_cenc_eew(data, source_key, source_label):
     play_sound(SOUND_ALERT, is_nhk=False)
 
     rows = []
+    rows.append(["ID", safe_get(data, 'ID', default='N/A')])
+    rows.append(["发报时间", safe_get(data, 'ReportTime', 'report_time')])
     rows.append(["发震时刻", safe_get(data, 'OriginTime', 'origin_time', 'shockTime')])
     rows.append(["震中位置", safe_get(data, 'HypoCenter', 'Hypocenter', 'hypocenter', 'placeName')])
     lat = safe_get(data, 'Latitude', 'latitude')
     lon = safe_get(data, 'Longitude', 'longitude')
     rows.append(["坐标", f"{lat}, {lon}" if lat and lon else '未知'])
-    rows.append(["震级(M)", safe_get(data, 'Magunitude', 'magnitude')])
+    rows.append(["震级(M)", safe_get(data, 'Magnitude', 'Magunitude', 'magnitude')])
     rows.append(["深度(km)", safe_get(data, 'Depth', 'depth')])
+    rows.append(["速报序号", str(data.get('ReportNum', 'N/A'))])
     rows.append(["最大烈度(中国)", get_intensity_display(data, 'cenc')])
     rows.append(["最终报", "是" if data.get('isFinal', data.get('is_final', False)) else "否"])
 
@@ -627,13 +644,16 @@ def process_sc_eew(data, source_key, source_label):
     play_sound(SOUND_ALERT, is_nhk=False)
 
     rows = []
+    rows.append(["ID", safe_get(data, 'ID', default='N/A')])
+    rows.append(["发报时间", safe_get(data, 'ReportTime', 'report_time')])
     rows.append(["发震时刻", safe_get(data, 'OriginTime', 'origin_time')])
-    rows.append(["震中位置", safe_get(data, 'Hypocenter', 'placeName')])
+    rows.append(["震中位置", safe_get(data, 'HypoCenter', 'Hypocenter', 'placeName')])
     lat = safe_get(data, 'Latitude', 'latitude')
     lon = safe_get(data, 'Longitude', 'longitude')
     rows.append(["坐标", f"{lat}, {lon}" if lat and lon else '未知'])
     rows.append(["震级(M)", safe_get(data, 'Magunitude', 'magnitude')])
     rows.append(["深度(km)", safe_get(data, 'Depth', 'depth')])
+    rows.append(["速报序号", str(data.get('ReportNum', 'N/A'))])
     rows.append(["最大烈度(中国)", get_intensity_display(data, 'cenc')])
     rows.append(["警报触发", "是" if data.get('isWarn', False) else "否"])
 
@@ -648,14 +668,16 @@ def process_fj_eew(data, source_key, source_label):
     play_sound(SOUND_ALERT, is_nhk=False)
 
     rows = []
+    rows.append(["ID", safe_get(data, 'ID', default='N/A')])
+    rows.append(["发报时间", safe_get(data, 'ReportTime', 'report_time')])
     rows.append(["发震时刻", safe_get(data, 'OriginTime', 'origin_time')])
-    rows.append(["震中位置", safe_get(data, 'Hypocenter', 'placeName')])
+    rows.append(["震中位置", safe_get(data, 'HypoCenter', 'Hypocenter', 'placeName')])
     lat = safe_get(data, 'Latitude', 'latitude')
     lon = safe_get(data, 'Longitude', 'longitude')
     rows.append(["坐标", f"{lat}, {lon}" if lat and lon else '未知'])
     rows.append(["震级(M)", safe_get(data, 'Magunitude', 'magnitude')])
-    rows.append(["深度(km)", safe_get(data, 'Depth', 'depth')])
-    rows.append(["最大烈度(中国)", get_intensity_display(data, 'cenc')])
+    rows.append(["速报序号", str(data.get('ReportNum', 'N/A'))])
+    rows.append(["最终报", "是" if data.get('isFinal', False) else "否"])
 
     print_earthquake_table("地震测定报 (福建省地震局 FJ)", rows, source_label)
 
@@ -668,16 +690,55 @@ def process_cq_eew(data, source_key, source_label):
     play_sound(SOUND_ALERT, is_nhk=False)
 
     rows = []
+    rows.append(["ID", safe_get(data, 'ID', default='N/A')])
+    rows.append(["发报时间", safe_get(data, 'ReportTime', 'report_time')])
     rows.append(["发震时刻", safe_get(data, 'OriginTime', 'origin_time')])
-    rows.append(["震中位置", safe_get(data, 'Hypocenter', 'placeName')])
+    rows.append(["震中位置", safe_get(data, 'HypoCenter', 'Hypocenter', 'placeName')])
     lat = safe_get(data, 'Latitude', 'latitude')
     lon = safe_get(data, 'Longitude', 'longitude')
     rows.append(["坐标", f"{lat}, {lon}" if lat and lon else '未知'])
-    rows.append(["震级(M)", safe_get(data, 'Magunitude', 'magnitude')])
+    rows.append(["震级(M)", safe_get(data, 'Magnitude', 'Magunitude', 'magnitude')])
     rows.append(["深度(km)", safe_get(data, 'Depth', 'depth')])
+    rows.append(["速报序号", str(data.get('ReportNum', 'N/A'))])
     rows.append(["最大烈度(中国)", get_intensity_display(data, 'cenc')])
 
     print_earthquake_table("地震测定报 (重庆市地震局 CQ)", rows, source_label)
+
+
+def process_cenc_eqlist(data, source_key, source_label):
+    entries = []
+    if any(k.startswith('No') for k in data):
+        for key in sorted(data.keys(), key=lambda k: int(k[2:]) if k[2:].isdigit() else 0):
+            entry = data[key]
+            if isinstance(entry, dict):
+                entries.append(entry)
+    else:
+        entries = [data]
+    for entry in entries:
+        event_id = safe_get(entry, 'EventID', 'event_id', 'id', default='')
+        if not event_id or event_id in processed_events:
+            continue
+        processed_events.add(event_id)
+        rows = []
+        rows.append(["发震时刻", safe_get(entry, 'time', 'OriginTime')])
+        rows.append(["发报时间", safe_get(entry, 'ReportTime', 'report_time')])
+        rows.append(["震中位置", safe_get(entry, 'location', 'placeName', 'Hypocenter')])
+        lat = safe_get(entry, 'latitude', 'Latitude')
+        lon = safe_get(entry, 'longitude', 'Longitude')
+        rows.append(["坐标", f"{lat}, {lon}" if lat and lon else '未知'])
+        rows.append(["震级(M)", safe_get(entry, 'magnitude', 'Magunitude')])
+        rows.append(["深度(km)", safe_get(entry, 'depth', 'Depth')])
+        rows.append(["最大烈度", safe_get(entry, 'intensity', 'MaxIntensity', 'N/A')])
+        rows.append(["信息类型", safe_get(entry, 'type', 'N/A')])
+        lat = safe_get(entry, 'latitude', 'Latitude')
+        lon = safe_get(entry, 'longitude', 'Longitude')
+        rows.append(["坐标", f"{lat}, {lon}" if lat and lon else '未知'])
+        rows.append(["震级(M)", safe_get(entry, 'magnitude', 'Magunitude')])
+        rows.append(["深度(km)", safe_get(entry, 'depth', 'Depth')])
+        rows.append(["最大烈度", safe_get(entry, 'intensity', 'MaxIntensity', 'N/A')])
+        rows.append(["信息类型", safe_get(entry, 'type', 'N/A')])
+        print_earthquake_table("地震信息 (中国地震台网 CENC 目录)", rows, source_label)
+        play_sound(SOUND_ALERT, is_nhk=False)
 
 
 def process_cea_eew(data, source_key, source_label):
@@ -840,8 +901,6 @@ def process_eew(data, source_key, default_type=None):
         if data_type in FILTER_DETAIL[source_key]:
             if not FILTER_DETAIL[source_key][data_type]:
                 return
-    if not FILTER_CONFIG.get(data_type, True):
-        return
 
     if source_key == 'fan':
         source_label = f"{SOURCE_DISPLAY['fan']} ({data_type})"
@@ -1579,7 +1638,7 @@ def start_fan_websocket():
             threading.Timer(FAN_RECONNECT_DELAY, start_fan_websocket).start()
 
 
-# ---------- Wolfx WebSocket (已禁用，保留占位) ----------
+# ---------- Wolfx WebSocket ----------
 def on_message_factory(source_key):
     def on_message(ws, message):
         if not SOURCE_CONFIG.get(source_key, {}).get('enabled', True):
@@ -1587,6 +1646,29 @@ def on_message_factory(source_key):
         try:
             data = json.loads(message)
             if not isinstance(data, dict):
+                return
+            msg_type = data.get('type', '')
+            if msg_type == 'heartbeat':
+                if DEBUG:
+                    ts = data.get('timestamp', 0)
+                    if ts:
+                        delay = int(time.time() * 1000 - int(ts))
+                        console.print(f"[dim][DEBUG] Wolfx 心跳 (延迟: {delay}ms)[/dim]")
+                    else:
+                        console.print("[dim][DEBUG] Wolfx 心跳[/dim]")
+                try:
+                    ws.send("ping")
+                except:
+                    pass
+                return
+            if msg_type == 'pong':
+                if DEBUG:
+                    console.print("[dim][DEBUG] Wolfx Pong[/dim]")
+                return
+            if msg_type.endswith('_eew'):
+                data['type'] = msg_type[:-4]
+            if data.get('type') == 'cenc_eqlist':
+                process_cenc_eqlist(data, source_key, SOURCE_DISPLAY.get(source_key, source_key))
                 return
             if 'EventID' in data or 'event_id' in data:
                 process_eew(data, source_key)
@@ -1711,6 +1793,7 @@ def handle_command(cmd):
         console.print("  enable <source>/all           - 启用该数据源所有子源 (如 enable fan/all)")
         console.print("  restart <source>              - 重启数据源 (或 restart all)")
         console.print("  status                        - 查看所有数据源状态")
+        console.print("  list                          - 获取并显示中国地震台网地震目录 (cenc_eqlist)")
         console.print("  help                          - 显示此帮助")
         console.print("[dim]快捷键: Ctrl+C 退出[/dim]")
         return
@@ -1864,6 +1947,24 @@ def handle_command(cmd):
             _enable_source(src)
         return
 
+    elif parts[0] == 'list':
+        try:
+            url = HTTP_URLS.get('cenc_eqlist')
+            if not url:
+                console.print("[yellow]cenc_eqlist URL 未配置[/yellow]")
+                return
+            console.print("[cyan]正在获取中国地震台网地震目录...[/cyan]")
+            response = requests.get(url, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                if data and isinstance(data, dict):
+                    process_cenc_eqlist(data, 'wolfx', SOURCE_DISPLAY.get('wolfx', 'Wolfx'))
+            else:
+                console.print(f"[red]请求失败: HTTP {response.status_code}[/red]")
+        except Exception as e:
+            console.print(f"[red]获取失败: {e}[/red]")
+        return
+
     elif parts[0] == 'status':
         console.print("[cyan]当前数据源状态:[/cyan]")
         for key, config in SOURCE_CONFIG.items():
@@ -1998,6 +2099,11 @@ def main():
     console.print("[cyan]输入 help 查看命令[/cyan]\n")
 
     fetch_initial_snapshots()
+
+    if SOURCE_CONFIG.get('wolfx', {}).get('enabled', False):
+        ws_status['wolfx'] = 'connecting'
+        threading.Thread(target=start_websocket, args=('wolfx',), daemon=True).start()
+        time.sleep(1)
 
     if SOURCE_CONFIG.get('p2pjson', {}).get('enabled', False):
         ws_status['p2pjson'] = 'connecting'
