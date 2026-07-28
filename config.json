@@ -1,0 +1,68 @@
+{
+  "sources": {
+    "wolfx": {
+      "enabled": true,
+      "url": "wss://ws-api.wolfx.jp/all_eew",
+      "fallback_urls": []
+    },
+    "p2p": {
+      "enabled": false
+    },
+    "p2pjson": {
+      "enabled": false,
+      "url": "wss://api.p2pquake.net/v2/ws"
+    },
+    "nied": {
+      "enabled": false,
+      "url": "wss://sismotide.top/nied",
+      "fallback_urls": []
+    },
+    "fan": {
+      "enabled": false,
+      "url": "wss://ws.fanstudio.tech/all",
+      "fallback_urls": [
+        "wss://ws.fanstudio.hk/all"
+      ]
+    }
+  },
+  "filters": {
+    "wolfx": {
+      "jma": false,
+      "cenc": true,
+      "sc": true,
+      "fj": true,
+      "cq": true
+    },
+    "p2p": {
+      "jma": false
+    },
+    "p2pjson": {},
+    "nied": {},
+    "fan": {
+      "cea": false,
+      "cwa-eew": false,
+      "jma": false,
+      "cenc": false,
+      "cwa": false,
+      "cea-pr": false,
+      "ningxia": false,
+      "guangxi": false,
+      "shanxi": false,
+      "beijing": false,
+      "yunnan": false,
+      "hko": false,
+      "usgs": false,
+      "sa": false,
+      "emsc": false,
+      "bcsf": false,
+      "gfz": false,
+      "usp": false,
+      "kma": false,
+      "kma-eew": false,
+      "fssn": false,
+      "fssn-cmt": false
+    }
+  },
+  "export_path": null,
+  "debug": false
+}

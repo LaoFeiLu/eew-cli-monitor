@@ -144,25 +144,106 @@ def get_intensity_display(data, source_type=None):
 
 
 # ================== 配置文件路径（持久化） ==================
-CONFIG_FILE = "eew_monitor_config.json"
+CONFIG_FILE = "config.json"
+
+
+def build_default_config():
+    config = {
+        'sources': {},
+        'filters': {key: dict(val) for key, val in FILTER_DETAIL.items()},
+        'export_path': None,
+        'debug': False
+    }
+    for key, cfg in SOURCE_CONFIG.items():
+        src = {'enabled': cfg['enabled']}
+        if 'url' in cfg:
+            src['url'] = cfg['url']
+        if 'fallback_urls' in cfg:
+            src['fallback_urls'] = cfg['fallback_urls']
+        config['sources'][key] = src
+    return config
+
+
+def deep_merge(default, override):
+    merged = {}
+    for key in default:
+        if key in override:
+            if isinstance(default[key], dict) and isinstance(override[key], dict):
+                merged[key] = deep_merge(default[key], override[key])
+            else:
+                merged[key] = override[key]
+        else:
+            merged[key] = default[key]
+    for key in override:
+        if key not in merged:
+            merged[key] = override[key]
+    return merged
 
 
 def load_config():
+    default = build_default_config()
     try:
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                user_config = json.load(f)
+            merged = deep_merge(default, user_config)
+            if DEBUG:
+                console.print(f"[dim][DEBUG] config.json 已加载 (sources:{len(merged.get('sources',{}))}, filters:{len(merged.get('filters',{}))})[/dim]")
+            return merged
+    except json.JSONDecodeError:
+        console.print(f"[red]config.json 格式错误，使用默认配置[/red]")
     except Exception:
         pass
-    return {}
+    console.print("[yellow]未找到 config.json，使用默认配置[/yellow]")
+    return default
 
 
-def save_config(config):
+def save_config():
+    config = {
+        'sources': {},
+        'filters': {key: dict(val) for key, val in FILTER_DETAIL.items()},
+        'export_path': EXPORT_FILE_PATH,
+        'debug': DEBUG
+    }
+    for key, cfg in SOURCE_CONFIG.items():
+        src = {'enabled': cfg['enabled']}
+        if 'url' in cfg:
+            src['url'] = cfg['url']
+        if 'fallback_urls' in cfg:
+            src['fallback_urls'] = cfg['fallback_urls']
+        config['sources'][key] = src
     try:
         with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
             json.dump(config, f, indent=2, ensure_ascii=False)
+        if DEBUG:
+            console.print(f"[dim][DEBUG] config.json 已保存[/dim]")
     except Exception as e:
         console.print(f"[red]保存配置失败: {e}[/red]")
+
+
+def apply_config(config):
+    global SOURCE_CONFIG, FILTER_DETAIL, EXPORT_FILE_PATH, FAN_RECONNECT_DELAY, DEBUG
+    sources_cfg = config.get('sources', {})
+    for key, src_cfg in sources_cfg.items():
+        if key in SOURCE_CONFIG:
+            if 'enabled' in src_cfg:
+                SOURCE_CONFIG[key]['enabled'] = src_cfg['enabled']
+            if 'url' in src_cfg and src_cfg['url'] is not None:
+                SOURCE_CONFIG[key]['url'] = src_cfg['url']
+            if 'fallback_urls' in src_cfg and src_cfg['fallback_urls'] is not None:
+                SOURCE_CONFIG[key]['fallback_urls'] = src_cfg['fallback_urls']
+    filters_cfg = config.get('filters', {})
+    for src, sub_filters in filters_cfg.items():
+        if src in FILTER_DETAIL:
+            for sub, enabled in sub_filters.items():
+                if sub in FILTER_DETAIL[src]:
+                    FILTER_DETAIL[src][sub] = enabled
+    if 'export_path' in config:
+        EXPORT_FILE_PATH = config['export_path']
+    if 'fan_reconnect_delay' in config:
+        FAN_RECONNECT_DELAY = config['fan_reconnect_delay']
+    if 'debug' in config:
+        DEBUG = config['debug']
 
 
 # ================== 数据源配置 ==================
@@ -751,6 +832,10 @@ def process_eew(data, source_key, default_type=None):
     if not data_type:
         return
 
+    if DEBUG:
+        event_id = data.get('EventID') or data.get('eventId') or data.get('id', '?')
+        console.print(f"[dim][DEBUG] process_eew: type={data_type}, source={source_key}, id={event_id}[/dim]")
+
     if source_key in FILTER_DETAIL:
         if data_type in FILTER_DETAIL[source_key]:
             if not FILTER_DETAIL[source_key][data_type]:
@@ -1043,33 +1128,46 @@ def process_weather_warning(data, source_key):
 # ---------- 快照 ----------
 def fetch_initial_snapshots():
     console.print("[dim]正在获取启动快照...[/dim]")
-    for source_key, enabled in FILTER_CONFIG.items():
-        if not enabled:
-            continue
-        url = HTTP_URLS.get(source_key)
-        if not url:
-            continue
+    if SOURCE_CONFIG.get('wolfx', {}).get('enabled', False):
+        for source_key, enabled in FILTER_DETAIL.get('wolfx', {}).items():
+            if not enabled:
+                continue
+            url = HTTP_URLS.get(source_key)
+            if not url:
+                continue
+            if DEBUG:
+                console.print(f"[dim][DEBUG] HTTP GET {url}[/dim]")
+            try:
+                response = requests.get(url, timeout=5)
+                if DEBUG:
+                    console.print(f"[dim][DEBUG] HTTP GET {url} -> {response.status_code}[/dim]")
+                if response.status_code == 200:
+                    data = response.json()
+                    if data and isinstance(data, dict) and ('EventID' in data or 'event_id' in data):
+                        data['type'] = source_key
+                        process_eew(data, 'wolfx')
+            except Exception as e:
+                if DEBUG:
+                    console.print(f"[dim][DEBUG] HTTP GET {url} 失败: {e}[/dim]")
+
+    if SOURCE_CONFIG.get('p2pjson', {}).get('enabled', False):
+        if DEBUG:
+            console.print(f"[dim][DEBUG] HTTP GET P2P history (551)[/dim]")
         try:
-            response = requests.get(url, timeout=5)
+            p2pjson_url = "https://api.p2pquake.net/v2/history?codes=551&limit=3"
+            response = requests.get(p2pjson_url, timeout=5)
+            if DEBUG:
+                console.print(f"[dim][DEBUG] HTTP GET P2P history -> {response.status_code}[/dim]")
             if response.status_code == 200:
                 data = response.json()
-                if data and isinstance(data, dict) and ('EventID' in data or 'event_id' in data):
-                    data['type'] = source_key
-                    process_eew(data, 'wolfx')
-        except Exception:
-            pass
-
-    # 从 P2P JSON API 获取快照
-    try:
-        p2pjson_url = "https://api.p2pquake.net/v2/history?codes=551&limit=3"
-        response = requests.get(p2pjson_url, timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            if isinstance(data, list):
-                for quake in data[:3]:
-                    process_p2p_quake(quake)
-    except Exception:
-        pass
+                if isinstance(data, list):
+                    if DEBUG:
+                        console.print(f"[dim][DEBUG] P2P history 返回 {len(data)} 条[/dim]")
+                    for quake in data[:3]:
+                        process_p2p_quake(quake)
+        except Exception as e:
+            if DEBUG:
+                console.print(f"[dim][DEBUG] P2P history 请求失败: {e}[/dim]")
 
     console.print("[dim]快照获取完成。[/dim]")
 
@@ -1223,6 +1321,8 @@ def start_p2pjson_websocket():
         return
     if not SOURCE_CONFIG.get('p2pjson', {}).get('enabled', True):
         return
+    if DEBUG:
+        console.print(f"[dim][DEBUG] P2P JSON WebSocket 开始连接...[/dim]")
     url = SOURCE_CONFIG['p2pjson']['url']
     try:
         websocket.enableTrace(False)
@@ -1332,6 +1432,8 @@ def start_nied_websocket():
         return
     if not SOURCE_CONFIG.get('nied', {}).get('enabled', True):
         return
+    if DEBUG:
+        console.print(f"[dim][DEBUG] NIED WebSocket 开始连接...[/dim]")
     url = SOURCE_CONFIG['nied']['url']
     try:
         websocket.enableTrace(False)
@@ -1450,6 +1552,8 @@ def start_fan_websocket():
         return
     if not SOURCE_CONFIG.get('fan', {}).get('enabled', True):
         return
+    if DEBUG:
+        console.print(f"[dim][DEBUG] FAN WebSocket 开始连接...[/dim]")
     elapsed = time.time() - fan_last_reconnect_time
     if elapsed < FAN_RECONNECT_DELAY and fan_last_reconnect_time > 0:
         remaining = int(FAN_RECONNECT_DELAY - elapsed)
@@ -1519,6 +1623,8 @@ def start_websocket(source_key):
         return
     if not SOURCE_CONFIG.get(source_key, {}).get('enabled', True):
         return
+    if DEBUG:
+        console.print(f"[dim][DEBUG] {source_key} WebSocket 开始连接...[/dim]")
     url = SOURCE_CONFIG[source_key]['url']
     try:
         websocket.enableTrace(False)
@@ -1544,6 +1650,8 @@ def handle_command(cmd):
     parts = cmd.split()
     if not parts:
         return
+    if DEBUG:
+        console.print(f"[dim][DEBUG] 收到命令: {cmd}[/dim]")
 
     def _stop_source(target):
         if target not in SOURCE_CONFIG:
@@ -1602,7 +1710,6 @@ def handle_command(cmd):
         console.print("  enable <source>/<subtype>     - 启用子源")
         console.print("  enable <source>/all           - 启用该数据源所有子源 (如 enable fan/all)")
         console.print("  restart <source>              - 重启数据源 (或 restart all)")
-        console.print("  reset                         - 一键恢复所有配置到默认状态并自动重连")
         console.print("  status                        - 查看所有数据源状态")
         console.print("  help                          - 显示此帮助")
         console.print("[dim]快捷键: Ctrl+C 退出[/dim]")
@@ -1616,13 +1723,16 @@ def handle_command(cmd):
         if len(parts) == 1:
             DEBUG = not DEBUG
             console.print(f"[dim]调试模式: {'开启' if DEBUG else '关闭'}[/dim]")
+            save_config()
         elif len(parts) == 2:
             if parts[1] == 'on':
                 DEBUG = True
                 console.print("[dim]调试模式: 开启[/dim]")
+                save_config()
             elif parts[1] == 'off':
                 DEBUG = False
                 console.print("[dim]调试模式: 关闭[/dim]")
+                save_config()
             else:
                 console.print("[yellow]用法: debug [on|off] 或 debug (切换)[/yellow]")
         return
@@ -1654,9 +1764,7 @@ def handle_command(cmd):
                 EXPORT_FILE_PATH = os.path.join(prog_dir, raw_path)
             else:
                 EXPORT_FILE_PATH = raw_path
-            config = load_config()
-            config['export_path'] = EXPORT_FILE_PATH
-            save_config(config)
+            save_config()
             if EXPORT_FILE:
                 EXPORT_FILE.close()
                 EXPORT_FILE = None
@@ -1679,6 +1787,7 @@ def handle_command(cmd):
                 for key in FILTER_DETAIL[src]:
                     FILTER_DETAIL[src][key] = False
                 console.print(f"[yellow]{src} 所有子源已停用[/yellow]")
+                save_config()
                 return
             else:
                 if sub not in FILTER_DETAIL[src]:
@@ -1689,14 +1798,17 @@ def handle_command(cmd):
                     return
                 FILTER_DETAIL[src][sub] = False
                 console.print(f"[yellow]{src}/{sub} 已停用[/yellow]")
+                save_config()
                 return
         else:
             if target == 'all':
                 for key in SOURCE_CONFIG:
                     _stop_source(key)
+                save_config()
                 return
             else:
                 _stop_source(target)
+                save_config()
                 return
 
     elif parts[0] == 'enable':
@@ -1713,6 +1825,7 @@ def handle_command(cmd):
                 for key in FILTER_DETAIL[src]:
                     FILTER_DETAIL[src][key] = True
                 console.print(f"[green]{src} 所有子源已启用[/green]")
+                save_config()
                 return
             else:
                 if sub not in FILTER_DETAIL[src]:
@@ -1723,14 +1836,17 @@ def handle_command(cmd):
                     return
                 FILTER_DETAIL[src][sub] = True
                 console.print(f"[green]{src}/{sub} 已启用[/green]")
+                save_config()
                 return
         else:
             if target == 'all':
                 for key in SOURCE_CONFIG:
                     _enable_source(key)
+                save_config()
                 return
             else:
                 _enable_source(target)
+                save_config()
                 return
 
     elif parts[0] == 'restart':
@@ -1746,94 +1862,6 @@ def handle_command(cmd):
             if SOURCE_CONFIG[src]['enabled']:
                 _stop_source(src)
             _enable_source(src)
-        return
-
-    elif parts[0] == 'reset':
-        SOURCE_CONFIG = {
-            'wolfx': {
-                'name': 'Wolfx',
-                'url': 'wss://ws-api.wolfx.jp/all_eew',
-                'enabled': False,
-                'type': 'all',
-                'need_subscribe': False,
-                'fallback_urls': []
-            },
-            'p2p': {
-                'name': 'P2PQuake (EPSP)',
-                'enabled': False,
-                'type': 'jma_only'
-            },
-            'p2pjson': {
-                'name': 'P2PQuake (JSON API v2)',
-                'url': 'wss://api.p2pquake.net/v2/ws',
-                'enabled': True,
-                'type': 'websocket',
-                'need_subscribe': True,
-                'subscribe_msg': '{"type":"subscribe","topic":"all"}'
-            },
-            'nied': {
-                'name': 'NIED (日本防灾科学技术研究所)',
-                'url': 'wss://sismotide.top/nied',
-                'enabled': True,
-                'type': 'jma_only',
-                'need_subscribe': False,
-                'fallback_urls': []
-            },
-            'fan': {
-                'name': 'FAN Studio (地震)',
-                'url': 'wss://ws.fanstudio.tech/all',
-                'enabled': True,
-                'type': 'all',
-                'need_subscribe': False,
-                'fallback_urls': ['wss://ws.fanstudio.hk/all']
-            }
-        }
-        FILTER_DETAIL = {
-            'wolfx': {
-                'jma': True,
-                'cenc': True,
-                'sc': False,
-                'fj': False,
-                'cq': False
-            },
-            'p2p': {
-                'jma': True
-            },
-            'p2pjson': {},
-            'nied': {},
-            'fan': {
-                'cea': True,
-                'cwa-eew': True,
-                'jma': True,
-                'cenc': True,
-                'cwa': True,
-                'cea-pr': False,
-                'ningxia': False,
-                'guangxi': False,
-                'shanxi': False,
-                'beijing': False,
-                'yunnan': False,
-                'hko': False,
-                'usgs': False,
-                'sa': False,
-                'emsc': False,
-                'bcsf': False,
-                'gfz': False,
-                'usp': False,
-                'kma': False,
-                'kma-eew': False,
-                'fssn': False,
-                'fssn-cmt': False,
-            }
-        }
-        for sub in FAN_SUBTYPES:
-            if sub not in FILTER_DETAIL['fan']:
-                FILTER_DETAIL['fan'][sub] = False
-        EXPORT_FILE_PATH = None
-        save_config({})
-        console.print("[dim]导出路径配置已重置[/dim]")
-        console.print("[green]配置已恢复默认，正在重新连接所有数据源...[/green]")
-        handle_command('restart all')
         return
 
     elif parts[0] == 'status':
@@ -1956,9 +1984,14 @@ def main():
         console.print("[yellow]提示: 紧急铃声文件未找到，将无法播放。[/yellow]")
 
     config = load_config()
-    if 'export_path' in config:
-        EXPORT_FILE_PATH = config['export_path']
+    apply_config(config)
+    if EXPORT_FILE_PATH:
         console.print(f"[dim]加载导出路径配置: {EXPORT_FILE_PATH}[/dim]")
+    if DEBUG:
+        enabled_list = [k for k, v in SOURCE_CONFIG.items() if v['enabled']]
+        disabled_list = [k for k, v in SOURCE_CONFIG.items() if not v['enabled']]
+        console.print(f"[dim][DEBUG] 已启用: {', '.join(enabled_list) if enabled_list else '无'}[/dim]")
+        console.print(f"[dim][DEBUG] 已禁用: {', '.join(disabled_list) if disabled_list else '无'}[/dim]")
 
     console.print("[cyan]数据源: Wolfx(快照) + P2PQuake(JSON API) + NIED + FAN Studio(地震)[/cyan]")
     console.print("[cyan]按 Ctrl+C 退出[/cyan]")
