@@ -1652,7 +1652,7 @@ def on_message_factory(source_key):
                 if DEBUG:
                     ts = data.get('timestamp', 0)
                     if ts:
-                        delay = int(time.time() * 1000 - int(ts))
+                        delay = abs(int(time.time() * 1000 - int(ts)))
                         console.print(f"[dim][DEBUG] Wolfx 心跳 (延迟: {delay}ms)[/dim]")
                     else:
                         console.print("[dim][DEBUG] Wolfx 心跳[/dim]")
