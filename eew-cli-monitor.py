@@ -15,6 +15,7 @@ from datetime import datetime
 from rich.console import Console
 from rich.table import Table
 from rich import box
+from rich.text import Text
 
 try:
     import msvcrt
@@ -351,6 +352,22 @@ $toast = [Windows.UI.Notifications.ToastNotification]::new($template)
         return False
 
 
+# def bark_countdown_loop(event_id, initial_seconds, title_base, subtitle, body_source, level, **extras):
+#     for remaining in range(initial_seconds, -1, -1):
+#         if BARK_COUNTDOWN_THREADS.get(event_id) != threading.current_thread():
+#             return
+#         body = f"预计 {remaining}秒后到达 {body_source}"
+#         send_bark(
+#             title=f"{title_base} {remaining}秒后到达",
+#             subtitle=subtitle,
+#             body=body,
+#             level=level,
+#             **extras
+#         )
+#         time.sleep(1)
+#     BARK_COUNTDOWN_THREADS.pop(event_id, None)
+
+
 def trigger_alert(source_label, origin_name, magnitude, depth,
                   distance_km, local_intensity, max_intensity,
                   origin_time, p_seconds, s_seconds, event_id):
@@ -371,45 +388,39 @@ def trigger_alert(source_label, origin_name, magnitude, depth,
         play_sound(SOUND_EEW2)
 
     # Windows通知
-    win_msg = (f"发震时刻: {origin_time}\n"
-               f"震中: {origin_name}\n"
-               f"深度: {depth}km\n"
-               f"震级: M{magnitude}\n"
-               f"最大烈度: {max_intensity}\n"
-               f"P波: {p_seconds}秒后到达 | S波: {s_seconds}秒后到达\n"
-               f"距离{loc_name}: {distance_km:.0f}km\n"
-               f"本地预估烈度: {local_intensity}度\n"
+    win_msg = (f"{origin_time} {origin_name} 深度{depth}km M{magnitude}级 烈度{local_intensity}\n"
+               f"P波 {p_seconds}秒后到达 | S波 {s_seconds}秒后到达\n"
+               f"到达{loc_name}距离{distance_km:.0f}km，预估本地烈度{local_intensity}\n"
                f"信号源: {source_label}")
-    show_windows_notification(f"地震预警 预计烈度{local_intensity}", win_msg)
+    show_windows_notification(f"地震预警预计烈度{local_intensity}", win_msg)
 
     # Bark
-    if tier is not None and tier != 0:
-        tier_cfg = tiers_config.get(f'tier{tier}', {}) if tier > 0 else {}
-        bark_enabled = tier_cfg.get('bark', True) if tier > 0 else True
-        if ALERT_BARK_URL and bark_enabled:
-            if tier == -1 or tier == 1:
-                send_bark(
-                    title=f"地震预警 {origin_name} {s_seconds}秒后到达",
-                    subtitle=f"预计烈度 {local_intensity}",
-                    body=f"距离震中 {distance_km:.0f}km，S波预计 {s_seconds}秒后到达",
-                    level="passive"
-                )
-            elif tier == 2:
-                send_bark(
-                    title=f"地震预警 {origin_name} {p_seconds}秒后到达",
-                    subtitle=f"震级 M{magnitude} 深度 {depth}km，预估烈度 {local_intensity}",
-                    body=f"预计 {p_seconds}秒后到达",
-                    level="active",
-                    volume=10, call="1", sound="alarm"
-                )
-            elif tier == 3:
-                send_bark(
-                    title=f"地震预警 {origin_name} {p_seconds}秒后到达",
-                    subtitle=f"震级 M{magnitude} 深度 {depth}km，预估烈度 {local_intensity}",
-                    body=f"预计 {p_seconds}秒后到达",
-                    level="critical",
-                    volume=10, call="1", sound="alarm"
-                )
+    tier_cfg = tiers_config.get(f'tier{tier}', {}) if tier is not None and tier > 0 else {}
+    bark_enabled = tier_cfg.get('bark', True) if tier is not None and tier > 0 else True
+    if ALERT_BARK_URL and bark_enabled:
+        title_base = f"地震预警 {origin_name}"
+        if tier is None or tier == -1 or tier == 0:
+            send_bark(
+                title=f"{title_base} {p_seconds}秒后到达",
+                subtitle=f"预计烈度 {local_intensity}",
+                body=f"距离震中 {distance_km:.0f}km，S波预计 {s_seconds}秒后到达，信号源: {source_label}",
+                level="passive"
+            )
+        elif tier == 1:
+            send_bark(
+                title=f"{title_base} {p_seconds}秒后到达",
+                subtitle=f"震级 M{magnitude} 深度 {depth}km，预估烈度 {local_intensity}",
+                body=f"预计 {p_seconds}秒后到达 信号源: {source_label}",
+                level="active"
+            )
+        elif tier >= 2:
+            send_bark(
+                title=f"{title_base} {p_seconds}秒后到达",
+                subtitle=f"震级 M{magnitude} 深度 {depth}km，预估烈度 {local_intensity}",
+                body=f"预计 {p_seconds}秒后到达 信号源: {source_label}",
+                level="critical",
+                volume=10, call="1", sound="alarm"
+            )
 
 
 # ================== 配置文件路径（持久化） ==================
@@ -682,6 +693,7 @@ USER_LONGITUDE = None
 # 预警配置
 ALERT_BARK_URL = None
 ALERT_TIERS = {}
+BARK_COUNTDOWN_THREADS = {}
 
 # 动态P/S波倒计时管理
 _countdown_active = {}
@@ -733,19 +745,59 @@ def write_table_to_csv(title, rows):
         console.print(f"[red]写入CSV失败: {e}[/red]")
 
 
+def _intensity_style(val):
+    roman_map = {'I':1,'II':2,'III':3,'IV':4,'V':5,'VI':6,'VII':7,'VIII':8,'IX':9,'X':10}
+    desc_map = {'无感':0,'微':1,'弱':2,'中':3,'较强':4,'强':5,'很强':6,'超强':7}
+    s = str(val).strip()
+    m = re.search(r'[\d.]+', s)
+    if m:
+        v = float(m.group())
+    else:
+        for r, iv in roman_map.items():
+            if r in s.upper():
+                v = iv
+                break
+        else:
+            for k, iv in desc_map.items():
+                if k in s:
+                    v = iv
+                    break
+            else:
+                return None
+    if v <= 0.5:
+        return "white on grey19"
+    if v <= 1.5:
+        return "white on green"
+    if v <= 2.5:
+        return "white on yellow"
+    if v <= 3.5:
+        return "white on dark_orange"
+    if v <= 4.5:
+        return "white on red"
+    return "bold white on red"
+
+
 def print_earthquake_table(title, rows, source_label):
     if not rows:
         return
     table = Table(title=title, box=box.ROUNDED, border_style="bold yellow")
     table.add_column("项目", style="cyan", no_wrap=True, width=12)
-    table.add_column("信息", style="white", no_wrap=False, width=48)
+    table.add_column("信息", no_wrap=False, width=48)
     rows_with_src = rows.copy()
     rows_with_src.append(["信号源", source_label])
     for row in rows_with_src:
-        table.add_row(str(row[0]), str(row[1]))
+        label = str(row[0])
+        val = str(row[1])
+        if '本地烈度' in label:
+            cell_style = _intensity_style(val)
+            if cell_style:
+                table.add_row(Text(label, style="cyan"), Text(val, style=cell_style))
+            else:
+                table.add_row(Text(label, style="cyan"), Text(val))
+        else:
+            table.add_row(Text(label, style="cyan"), Text(val))
     console.print(table)
     write_table_to_csv(title, rows_with_src)
-
 
 def print_weather_table(title, rows, source_label):
     if not rows:
@@ -1084,7 +1136,7 @@ def process_cenc_eqlist(data, source_key, source_label):
                 entries.append(entry)
     else:
         entries = [data]
-    for entry in entries:
+    for entry in entries[:3]:
         event_id = safe_get(entry, 'EventID', 'event_id', 'id', default='')
         if not event_id or event_id in processed_events:
             continue
@@ -2261,7 +2313,7 @@ def handle_command(cmd):
         run_mock_test(1.0, 0)
         return
     elif parts[0] == 'test1':
-        run_mock_test(3.0, 1)
+        run_mock_test(4.0, 1)
         return
     elif parts[0] == 'test2':
         run_mock_test(6.0, 2)
@@ -2504,19 +2556,40 @@ def main():
         console.print("[yellow]提示: 普通提示音文件未找到，将无法播放。[/yellow]")
     config = load_config()
     apply_config(config)
-    if EXPORT_FILE_PATH:
-        console.print(f"[dim]加载导出路径配置: {EXPORT_FILE_PATH}[/dim]")
-    if DEBUG:
-        enabled_list = [k for k, v in SOURCE_CONFIG.items() if v['enabled']]
-        disabled_list = [k for k, v in SOURCE_CONFIG.items() if not v['enabled']]
-        console.print(f"[dim][DEBUG] 已启用: {', '.join(enabled_list) if enabled_list else '无'}[/dim]")
-        console.print(f"[dim][DEBUG] 已禁用: {', '.join(disabled_list) if disabled_list else '无'}[/dim]")
 
-    console.print("[cyan]数据源: Wolfx(快照) + P2PQuake(JSON API) + NIED + FAN Studio(地震)[/cyan]")
-    console.print("[cyan]按 Ctrl+C 退出[/cyan]")
-    console.print("[cyan]输入 help 查看命令[/cyan]\n")
+    # ---------- 配置通报 ----------
+    loc_name = USER_LOCATION_NAME or "未设置"
+    loc_str = f"({USER_LATITUDE:.4f}, {USER_LONGITUDE:.4f})" if USER_LATITUDE and USER_LONGITUDE else ""
+    console.print(f"\n[bold]========== 配置通报 ==========[/bold]")
+    console.print(f"位置:      {loc_name} {loc_str}")
+    console.print(f"调试模式:  {'开启' if DEBUG else '关闭'}")
+    console.print(f"导出路径:  {EXPORT_FILE_PATH if EXPORT_FILE_PATH else '未设置'}")
 
-    fetch_initial_snapshots()
+    bark_txt = ALERT_BARK_URL if ALERT_BARK_URL else "未设置"
+    console.print(f"Bark地址:  {bark_txt}")
+
+    if ALERT_TIERS:
+        console.print(f"\n预警分级:")
+        for key in sorted(ALERT_TIERS.keys()):
+            tc = ALERT_TIERS[key]
+            lo = tc.get('min', '?')
+            hi = tc.get('max', '∞')
+            win = '开' if tc.get('windows', True) else '关'
+            bark = '开' if tc.get('bark', True) else '关'
+            console.print(f"  {key}    {lo}≤烈度<{hi}  Windows:{win}  Bark:{bark}")
+    else:
+        console.print(f"\n预警分级:  未配置")
+
+    console.print(f"\n数据源:")
+    for key, src_cfg in SOURCE_CONFIG.items():
+        status = '启用' if src_cfg['enabled'] else '禁用'
+        console.print(f"  {src_cfg['name']} ({key}): {status}")
+        if src_cfg['enabled'] and key in FILTER_DETAIL and FILTER_DETAIL[key]:
+            subs = FILTER_DETAIL[key]
+            parts = [f"{sub}{'开' if en else '关'}" for sub, en in subs.items()]
+            if parts:
+                console.print(f"    {' | '.join(parts)}")
+    console.print(f"[bold]==============================[/bold]\n")
 
     if SOURCE_CONFIG.get('wolfx', {}).get('enabled', False):
         ws_status['wolfx'] = 'connecting'

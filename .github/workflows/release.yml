@@ -1,0 +1,45 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Extract short commit SHA
+        id: vars
+        run: |
+          $sha = "$env:GITHUB_SHA".Substring(0, 5)
+          echo "commit_short=$sha" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller --onefile --name "${{ env.commit_short }}-eew-cli-monitor" eew-cli-monitor.py
+
+      - name: Prepare release assets
+        run: |
+          New-Item -ItemType Directory -Path release_assets -Force
+          Copy-Item "dist/${{ env.commit_short }}-eew-cli-monitor.exe" -Destination release_assets/
+          Copy-Item config.json -Destination release_assets/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release_assets/*
+          generate_release_notes: true
