@@ -2237,6 +2237,7 @@ def handle_command(cmd):
 
     if parts[0] == 'help':
         console.print("[cyan]可用命令:[/cyan]")
+        console.print("  test0                         - 模拟M1地震（汶川）")
         console.print("  test1                         - 模拟M3地震（汶川）")
         console.print("  test2                         - 模拟M6地震（汶川）")
         console.print("  test3                         - 模拟M8地震（汶川）")
@@ -2256,6 +2257,9 @@ def handle_command(cmd):
         console.print("[dim]快捷键: Ctrl+C 退出[/dim]")
         return
 
+    elif parts[0] == 'test0':
+        run_mock_test(1.0, 0)
+        return
     elif parts[0] == 'test1':
         run_mock_test(3.0, 1)
         return
