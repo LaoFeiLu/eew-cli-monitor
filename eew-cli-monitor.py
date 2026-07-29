@@ -1247,7 +1247,7 @@ def process_cq_eew(data, source_key, source_label):
             start_countdown(f"cq_{event_id}", ot, dist, USER_LOCATION_NAME, mag_val, origin_name)
 
 
-def process_cenc_eqlist(data, source_key, source_label):
+def process_cenc_eqlist(data, source_key, source_label, send_notification=True):
     entries = []
     if any(k.startswith('No') for k in data):
         for key in sorted(data.keys(), key=lambda k: int(k[2:]) if k[2:].isdigit() else 0):
@@ -1275,6 +1275,20 @@ def process_cenc_eqlist(data, source_key, source_label):
         rows.append(["信息类型", safe_get(entry, 'type', 'N/A')])
         print_earthquake_table("地震信息 (中国地震台网 CENC 目录)", rows, source_label)
         play_sound(SOUND_ALERT)
+        if send_notification:
+            dist = haversine(lat, lon, USER_LATITUDE, USER_LONGITUDE) if lat and lon and USER_LATITUDE else None
+            if dist is not None:
+                mag_val = safe_get(entry, 'magnitude', 'Magunitude')
+                origin_name = safe_get(entry, 'location', 'placeName', 'Hypocenter')
+                ot = safe_get(entry, 'time', 'OriginTime')
+                depth_val = safe_get(entry, 'depth', 'Depth')
+                max_int = safe_get(entry, 'intensity', 'MaxIntensity', 'N/A')
+                p_sec, s_sec = calc_wave_arrival(dist)
+                local_int = estimate_local_intensity(mag_val, dist)
+                trigger_alert(source_label, origin_name, mag_val, depth_val, dist,
+                              local_int, max_int, ot, p_sec, s_sec, event_id)
+                if local_int and local_int > 0:
+                    start_countdown(f"cenc_eqlist_{event_id}", ot, dist, USER_LOCATION_NAME, mag_val, origin_name)
 
 
 def process_cea_eew(data, source_key, source_label):
@@ -2599,7 +2613,7 @@ def handle_command(cmd):
             if response.status_code == 200:
                 data = response.json()
                 if data and isinstance(data, dict):
-                    process_cenc_eqlist(data, 'wolfx', SOURCE_DISPLAY.get('wolfx', 'Wolfx'))
+                    process_cenc_eqlist(data, 'wolfx', SOURCE_DISPLAY.get('wolfx', 'Wolfx'), send_notification=False)
             else:
                 console.print(f"[red]请求失败: HTTP {response.status_code}[/red]")
         except Exception as e:
