@@ -16,6 +16,7 @@ from rich.console import Console
 from rich.table import Table
 from rich import box
 from rich.text import Text
+from rich.prompt import Prompt
 
 try:
     import msvcrt
@@ -478,13 +479,132 @@ def load_config():
             merged = deep_merge(default, user_config)
             if DEBUG:
                 console.print(f"[dim][DEBUG] config.json 已加载 (sources:{len(merged.get('sources',{}))}, filters:{len(merged.get('filters',{}))})[/dim]")
-            return merged
+            return merged, True
     except json.JSONDecodeError:
         console.print(f"[red]config.json 格式错误，使用默认配置[/red]")
     except Exception:
         pass
-    console.print("[yellow]未找到 config.json，使用默认配置[/yellow]")
-    return default
+    return default, False
+
+
+def get_location_by_ip():
+    try:
+        resp = requests.get('http://ip-api.com/json/', timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get('status') == 'success':
+                lat = data.get('lat')
+                lon = data.get('lon')
+                city = data.get('city', '')
+                return lat, lon, city
+    except Exception:
+        pass
+    return None, None, None
+
+
+def setup_wizard():
+    global SOURCE_CONFIG, FILTER_DETAIL, USER_LOCATION_NAME, USER_LATITUDE, USER_LONGITUDE
+    global ALERT_BARK_URL, ALERT_TIERS, DEBUG, EXPORT_FILE_PATH, EXPORT_ENABLED
+
+    console.print("\n[bold cyan]========== 交互式配置向导 ==========[/bold cyan]")
+    console.print("[dim]请根据提示依次完成配置，直接回车使用默认值[/dim]")
+
+    # ---------- 1. 位置 ----------
+    console.print("\n[bold]--- 位置设置 ---[/bold]")
+    ip_lat, ip_lon, ip_city = get_location_by_ip()
+    use_ip = None
+    if ip_lat is not None and ip_lon is not None:
+        loc_preview = f"{ip_city} ({ip_lat:.4f}, {ip_lon:.4f})" if ip_city else f"({ip_lat:.4f}, {ip_lon:.4f})"
+        console.print(f"[green]通过 IP 获取到位置:[/green] {loc_preview}")
+        answer = Prompt.ask("  使用这个位置？可以用 https://lbs.qq.com/getPoint/ 获取精确坐标", choices=['y', 'n'], default='y')
+        use_ip = (answer == 'y')
+    else:
+        console.print("[yellow]无法通过 IP 获取位置，请手动输入[/yellow]")
+        use_ip = False
+
+    if use_ip:
+        USER_LATITUDE = ip_lat
+        USER_LONGITUDE = ip_lon
+        USER_LOCATION_NAME = ip_city or Prompt.ask("  请输入位置名称", default="未设置")
+    else:
+        lat_str = Prompt.ask("  请输入纬度 (latitude)", default=str(ip_lat) if ip_lat is not None else "30.0")
+        lon_str = Prompt.ask("  请输入经度 (longitude)", default=str(ip_lon) if ip_lon is not None else "120.0")
+        try:
+            USER_LATITUDE = float(lat_str)
+        except ValueError:
+            USER_LATITUDE = None
+        try:
+            USER_LONGITUDE = float(lon_str)
+        except ValueError:
+            USER_LONGITUDE = None
+        USER_LOCATION_NAME = Prompt.ask("  请输入位置名称（如城市名）", default="未设置")
+
+    # ---------- 2. Bark URL ----------
+    console.print("\n[bold]--- Bark 推送设置 ---[/bold]")
+    console.print("[dim]Bark 是一个 iOS 推送工具，可在 App Store 获取[/dim]")
+    console.print("[dim]例如: https://api.day.app/YourKey/[/dim]")
+    bark_input = Prompt.ask("  请输入 Bark 推送 URL（留空则不设置）", default="")
+    ALERT_BARK_URL = bark_input.strip() or None
+
+    # ---------- 3. 数据源 ----------
+    console.print("\n[bold]--- 数据源设置 ---[/bold]")
+    for key, cfg in SOURCE_CONFIG.items():
+        name = cfg.get('name', key)
+        default_enabled = 'y' if cfg.get('enabled', False) else 'n'
+        url_str = f" ({cfg.get('url', '')})" if 'url' in cfg else ""
+        answer = Prompt.ask(f"  启用 {name} ({key}){url_str}", choices=['y', 'n'], default=default_enabled)
+        SOURCE_CONFIG[key]['enabled'] = (answer == 'y')
+
+    # ---------- 4. Wolfx 过滤器 ----------
+    if SOURCE_CONFIG['wolfx']['enabled']:
+        console.print("\n[bold]--- Wolfx 过滤器设置 ---[/bold]")
+        for sub_key, default_val in FILTER_DETAIL['wolfx'].items():
+            default_str = 'y' if default_val else 'n'
+            answer = Prompt.ask(f"  启用 wolfx/{sub_key}", choices=['y', 'n'], default=default_str)
+            FILTER_DETAIL['wolfx'][sub_key] = (answer == 'y')
+
+    # ---------- 5. FAN 过滤器 ----------
+    if SOURCE_CONFIG['fan']['enabled']:
+        console.print("\n[bold]--- FAN 过滤器设置 ---[/bold]")
+        for sub_key in FILTER_DETAIL['fan']:
+            default_val = FILTER_DETAIL['fan'][sub_key]
+            default_str = 'y' if default_val else 'n'
+            answer = Prompt.ask(f"  启用 fan/{sub_key}", choices=['y', 'n'], default=default_str)
+            FILTER_DETAIL['fan'][sub_key] = (answer == 'y')
+
+    # ---------- 6. 预警分级 ----------
+    console.print("\n[bold]--- 预警分级设置 ---[/bold]")
+    console.print("[dim]按烈度范围分级，各分级可分别控制 Windows 弹窗和 Bark 推送[/dim]")
+    default_tiers = {
+        'tier1': {'min': 1.0, 'max': 2.0, 'windows': True, 'bark': True},
+        'tier2': {'min': 2.0, 'max': 3.0, 'windows': True, 'bark': True},
+        'tier3': {'min': 3.0, 'max': 12.0, 'windows': True, 'bark': True},
+    }
+    use_default_tiers = Prompt.ask("  使用默认预警分级（tier1:1-2级, tier2:2-3级, tier3:3级以上，全部开启 Windows 和 Bark）", choices=['y', 'n'], default='y')
+    if use_default_tiers == 'y':
+        ALERT_TIERS = default_tiers
+    else:
+        ALERT_TIERS = {}
+        for i in range(1, 4):
+            key = f'tier{i}'
+            min_val = Prompt.ask(f"  {key} 最小烈度", default=str(default_tiers[key]['min']))
+            max_val = Prompt.ask(f"  {key} 最大烈度（留空表示不限制）", default=str(default_tiers[key].get('max', '')))
+            win = Prompt.ask(f"  {key} 启用 Windows 弹窗", choices=['y', 'n'], default='y')
+            bark = Prompt.ask(f"  {key} 启用 Bark 推送", choices=['y', 'n'], default='y')
+            tier_cfg = {'min': float(min_val), 'windows': (win == 'y'), 'bark': (bark == 'y')}
+            if max_val.strip():
+                tier_cfg['max'] = float(max_val)
+            ALERT_TIERS[key] = tier_cfg
+
+    # ---------- 7. 调试模式 ----------
+    console.print("\n[bold]--- 调试模式 ---[/bold]")
+    debug_answer = Prompt.ask("  开启调试模式？", choices=['y', 'n'], default='n')
+    DEBUG = (debug_answer == 'y')
+
+    # ---------- 8. 保存 ----------
+    save_config()
+    console.print("\n[bold green]配置已保存到 config.json[/bold green]")
+    console.print("[bold cyan]========================================[/bold cyan]\n")
 
 
 def save_config():
@@ -2303,6 +2423,7 @@ def handle_command(cmd):
         console.print("  enable <source>/<subtype>     - 启用子源")
         console.print("  enable <source>/all           - 启用该数据源所有子源 (如 enable fan/all)")
         console.print("  restart <source>              - 重启数据源 (或 restart all)")
+        console.print("  setup                         - 运行交互式配置向导")
         console.print("  status                        - 查看所有数据源状态")
         console.print("  list                          - 获取并显示中国地震台网地震目录 (cenc_eqlist)")
         console.print("  help                          - 显示此帮助")
@@ -2485,6 +2606,10 @@ def handle_command(cmd):
             console.print(f"[red]获取失败: {e}[/red]")
         return
 
+    elif parts[0] == 'setup':
+        setup_wizard()
+        return
+
     elif parts[0] == 'status':
         console.print("[cyan]当前数据源状态:[/cyan]")
         for key, config in SOURCE_CONFIG.items():
@@ -2530,13 +2655,19 @@ def check_user_command():
             if ch == b'\x03':
                 raise KeyboardInterrupt
             if ch == b'\r':
+                msvcrt.putch(b'\r')
+                msvcrt.putch(b'\n')
                 break
             elif ch == b'\x08':
                 if line:
                     line.pop()
+                    msvcrt.putch(b'\x08')
+                    msvcrt.putch(b' ')
+                    msvcrt.putch(b'\x08')
             else:
                 if 32 <= ch[0] <= 126:
                     line.append(ch.decode('ascii'))
+                    msvcrt.putch(ch)
         raw = ''.join(line).strip()
         if not raw:
             return None
@@ -2554,7 +2685,22 @@ def main():
     console.print("\n[bold yellow]========== EEW-CLI-Monitor ==========[/bold yellow]")
     if not os.path.exists(SOUND_ALERT):
         console.print("[yellow]提示: 普通提示音文件未找到，将无法播放。[/yellow]")
-    config = load_config()
+    config, config_found = load_config()
+    if not config_found:
+        console.print("\n[bold red]未找到 config.json 配置文件[/bold red]")
+        console.print("[yellow]请输入 [bold]setup[/bold] 启动交互式配置向导[/yellow]")
+        apply_config(config)
+        while True:
+            if WINDOWS:
+                cmd = check_user_command()
+                if cmd:
+                    if cmd == 'setup':
+                        setup_wizard()
+                        break
+                    else:
+                        console.print("[yellow]请先输入 setup 完成配置[/yellow]")
+            time.sleep(0.1)
+        config, config_found = load_config()
     apply_config(config)
 
     # ---------- 配置通报 ----------
