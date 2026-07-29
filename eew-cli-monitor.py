@@ -257,7 +257,7 @@ SOURCE_CONFIG = {
     'wolfx': {
         'name': 'Wolfx',
         'url': 'wss://ws-api.wolfx.jp/all_eew',
-        'enabled': False,
+        'enabled': true,
         'type': 'all',
         'need_subscribe': False,
         'fallback_urls': []
@@ -270,7 +270,7 @@ SOURCE_CONFIG = {
     'p2pjson': {
         'name': 'P2PQuake (JSON API v2)',
         'url': 'wss://api.p2pquake.net/v2/ws',
-        'enabled': True,
+        'enabled': False,
         'type': 'websocket',
         'need_subscribe': True,
         'subscribe_msg': '{"type":"subscribe","topic":"all"}'
@@ -278,7 +278,7 @@ SOURCE_CONFIG = {
     'nied': {
         'name': 'NIED (日本防灾科学技术研究所)',
         'url': 'wss://sismotide.top/nied',
-        'enabled': True,
+        'enabled': False,
         'type': 'jma_only',
         'need_subscribe': False,
         'fallback_urls': []
@@ -286,7 +286,7 @@ SOURCE_CONFIG = {
     'fan': {
         'name': 'FAN Studio (地震)',
         'url': 'wss://ws.fanstudio.tech/all',
-        'enabled': True,
+        'enabled': False,
         'type': 'all',
         'need_subscribe': False,
         'fallback_urls': ['wss://ws.fanstudio.hk/all']
@@ -323,30 +323,30 @@ FAN_SUBTYPES = [
 
 FILTER_DETAIL = {
     'wolfx': {
-        'jma': True,
+        'jma': False,
         'cenc': True,
-        'sc': False,
-        'fj': False,
-        'cq': False,
+        'sc': True,
+        'fj': True,
+        'cq': True,
         'cenc_eqlist': False
     },
     'p2p': {
-        'jma': True
+        'jma': False
     },
     'p2pjson': {},
     'nied': {},
     'fan': {
-        'cea': True,
-        'cwa-eew': True,
-        'jma': True,
+        'cea': False,
+        'cwa-eew': False,
+        'jma': False,
         'cenc': True,
-        'cwa': True,
+        'cwa': False,
         'cea-pr': False,
-        'ningxia': False,
-        'guangxi': False,
-        'shanxi': False,
-        'beijing': False,
-        'yunnan': False,
+        'ningxia': True,
+        'guangxi': True,
+        'shanxi': True,
+        'beijing': True,
+        'yunnan': True,
         'hko': False,
         'usgs': False,
         'sa': False,
@@ -356,7 +356,7 @@ FILTER_DETAIL = {
         'usp': False,
         'kma': False,
         'kma-eew': False,
-        'fssn': False,
+        'fssn': True,
         'fssn-cmt': False,
     }
 }
