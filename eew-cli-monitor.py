@@ -2551,7 +2551,7 @@ def main():
     if not WS_AVAILABLE:
         console.print("[red]错误: websocket-client 未安装，WebSocket 数据源将不可用[/red]")
 
-    console.print("\n[bold yellow]========== Wolfx 地震预警命令行监控程序 v1.8.2 ==========[/bold yellow]")
+    console.print("\n[bold yellow]========== EEW-CLI-Monitor ==========[/bold yellow]")
     if not os.path.exists(SOUND_ALERT):
         console.print("[yellow]提示: 普通提示音文件未找到，将无法播放。[/yellow]")
     config = load_config()
