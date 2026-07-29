@@ -1990,7 +1990,9 @@ def handle_command(cmd):
 
     if parts[0] == 'help':
         console.print("[cyan]可用命令:[/cyan]")
-        console.print("  test                          - 模拟地震多报演示")
+        console.print("  test1                         - 模拟M3地震（汶川）")
+        console.print("  test2                         - 模拟M6地震（汶川）")
+        console.print("  test3                         - 模拟M8地震（汶川）")
         console.print("  debug [on|off]                - 开启/关闭调试模式")
         console.print("  export on/off                 - 开启/关闭表格导出到CSV")
         console.print("  export path <文件路径>        - 设置导出文件路径（相对路径）")
@@ -2007,8 +2009,14 @@ def handle_command(cmd):
         console.print("[dim]快捷键: Ctrl+C 退出[/dim]")
         return
 
-    elif parts[0] == 'test':
-        run_mock_test()
+    elif parts[0] == 'test1':
+        run_mock_test(3.0, 1)
+        return
+    elif parts[0] == 'test2':
+        run_mock_test(6.0, 2)
+        return
+    elif parts[0] == 'test3':
+        run_mock_test(8.0, 3)
         return
 
     elif parts[0] == 'debug':
@@ -2191,69 +2199,22 @@ def handle_command(cmd):
 
 
 # ---------- 模拟测试 ----------
-def generate_mock_jma_event(serial=1, is_final=False, event_id="MOCK001", intensity=None):
-    base_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    mock_mag = 4.5 + (serial * 0.1)
-    mock_depth = 50 - (serial * 2)
-    if intensity is None:
-        intensity_list = ["1", "2", "3", "4", "5弱", "5强", "6弱", "6強", "7"]
-        max_intensity = intensity_list[min(serial - 1, 8)]
-    else:
-        max_intensity = intensity
-    return {
-        "type": "jma",
-        "EventID": event_id,
-        "Serial": serial,
-        "OriginTime": base_time,
-        "Hypocenter": f"模拟地震区域 (第{serial}报)",
-        "Magunitude": round(mock_mag, 1),
-        "Depth": max(10, int(mock_depth)),
-        "MaxIntensity": max_intensity,
-        "isFinal": is_final,
-        "Latitude": 35.0 + random.random() * 5,
-        "Longitude": 138.0 + random.random() * 5,
-        "Accuracy": {"Epicenter": "锁", "Depth": "锁", "Magnitude": "锁"},
-        "WarnArea": [{"Chiiki": "模拟区域A", "Shindo1": max_intensity}]
-    }
-
-
-def run_mock_test():
-    console.print("\n[bold magenta]========== 模拟测试模式 ==========[/bold magenta]")
-    console.print("[yellow]第一报震度3（普通音），第二报震度6强（触发NHK），第三报震度7（不再触发NHK）[/yellow]")
-    console.print("[cyan]按任意键可中断测试。[/cyan]\n")
-
+def run_mock_test(magnitude, report_num):
     event_id = f"DEMO_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-    console.print("[cyan]第一报（震度3）...[/cyan]")
-    process_eew(generate_mock_jma_event(1, False, event_id, intensity="3"), 'test')
-    for _ in range(30):
-        if WINDOWS and msvcrt.kbhit():
-            msvcrt.getch()
-            console.print("[yellow]用户中断，退出模拟模式。[/yellow]")
-            return
-        time.sleep(0.1)
-
-    console.print("[cyan]第二报（震度6强）...[/cyan]")
-    process_eew(generate_mock_jma_event(2, False, event_id, intensity="6強"), 'test')
-    for _ in range(30):
-        if WINDOWS and msvcrt.kbhit():
-            msvcrt.getch()
-            console.print("[yellow]用户中断，退出模拟模式。[/yellow]")
-            return
-        time.sleep(0.1)
-
-    console.print("[cyan]第三报（震度7）...[/cyan]")
-    process_eew(generate_mock_jma_event(3, True, event_id, intensity="7"), 'test')
-
-    console.print("[green]模拟演示完成。按任意键继续...[/green]")
-    if WINDOWS:
-        while True:
-            if msvcrt.kbhit():
-                msvcrt.getch()
-                break
-            time.sleep(0.1)
-    else:
-        input()
-    console.print("[yellow]退出模拟模式。[/yellow]")
+    data = {
+        "type": "cenc",
+        "EventID": event_id,
+        "ReportNum": report_num,
+        "OriginTime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "HypoCenter": "汶川",
+        "Latitude": 31.0,
+        "Longitude": 103.4,
+        "Magnitude": magnitude,
+        "Depth": 10,
+        "MaxIntensity": str(min(int(magnitude * 1.5), 12)),
+        "isFinal": True,
+    }
+    process_eew(data, 'test')
 
 
 def check_user_command():
