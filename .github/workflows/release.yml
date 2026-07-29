@@ -37,7 +37,7 @@ jobs:
         run: pyinstaller --onefile --add-data "sounds;sounds" --strip --upx-dir "C:\ProgramData\chocolatey\lib\upx\tools" --exclude-module tkinter --exclude-module test --exclude-module unittest --exclude-module pydoc --exclude-module xmlrpc --exclude-module lib2to3 --exclude-module http.server --exclude-module sqlite3 --name "${{ env.commit_short }}-pyinstaller" eew-cli-monitor.py
 
       - name: Build with Nuitka
-        run: python -m nuitka --onefile --standalone --mingw64 --include-data-dir=sounds=sounds --output-filename="${{ env.commit_short }}-nuitka.exe" --output-dir=dist eew-cli-monitor.py
+        run: python -m nuitka --onefile --standalone --mingw64 --include-data-dir=sounds=sounds --assume-yes-for-downloads --output-filename="${{ env.commit_short }}-nuitka.exe" --output-dir=dist eew-cli-monitor.py
 
       - name: Prepare release assets
         run: |
