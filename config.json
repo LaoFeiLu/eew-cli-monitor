@@ -1,4 +1,9 @@
 {
+  "location": {
+    "name": "成都理工",
+    "latitude": 30.673352,
+    "longitude": 104.14126
+  },
   "sources": {
     "wolfx": {
       "enabled": true,

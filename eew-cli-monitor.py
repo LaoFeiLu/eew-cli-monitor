@@ -9,6 +9,7 @@ import threading
 import socket
 import csv
 import re
+import math
 from datetime import datetime
 from rich.console import Console
 from rich.table import Table
@@ -149,6 +150,143 @@ def get_intensity_display(data, source_type=None):
         return estimate_intensity(mag, depth, 'roman')
 
 
+# ================== 用户位置 / 距离 / 烈度 / 波到着 工具函数 ==================
+
+def haversine(lat1, lon1, lat2, lon2):
+    try:
+        lat1, lon1, lat2, lon2 = map(float, [lat1, lon1, lat2, lon2])
+        radius = 6378.137
+        dlat = math.radians(lat2 - lat1)
+        dlon = math.radians(lon2 - lon1)
+        a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+        return radius * c
+    except Exception:
+        return None
+
+
+def estimate_local_intensity(magnitude, distance_km):
+    try:
+        M = float(magnitude)
+        D = float(distance_km)
+        if M <= 0 or D < 0:
+            return 0.0
+        intensity = 1.363 * M + 2.941 - 1.494 * math.log(D + 7.0)
+        return round(max(intensity, 0.0), 1)
+    except Exception:
+        return None
+
+
+def calc_wave_arrival(distance_km):
+    try:
+        d = float(distance_km)
+        p_sec = d / 6.0
+        s_sec = d / 3.5
+        return (round(p_sec), round(s_sec))
+    except Exception:
+        return (None, None)
+
+
+def add_location_rows(rows, lat, lon, mag):
+    if USER_LATITUDE is None or USER_LONGITUDE is None:
+        return False
+    if not lat or not lon or not mag:
+        return False
+    dist = haversine(lat, lon, USER_LATITUDE, USER_LONGITUDE)
+    if dist is None:
+        return False
+    loc_name = USER_LOCATION_NAME or f"{USER_LATITUDE},{USER_LONGITUDE}"
+    rows.append(["到达距离", f"{dist:.0f}km (距{loc_name})"])
+
+    intensity = estimate_local_intensity(mag, dist)
+    if intensity is not None:
+        if intensity > 0:
+            rows.append(["本地烈度", f"{intensity}度"])
+        else:
+            rows.append(["本地烈度", "无感"])
+
+    p_sec, s_sec = calc_wave_arrival(dist)
+    if p_sec is not None:
+        rows.append(["P波到达", f"{p_sec}秒"])
+    if s_sec is not None:
+        rows.append(["S波到达", f"{s_sec}秒"])
+    return True
+
+
+# ================== P/S波动态倒计时 ==================
+
+def _parse_origin_time(time_str):
+    if not time_str:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%SZ"):
+        try:
+            return datetime.strptime(time_str, fmt).timestamp()
+        except ValueError:
+            continue
+    try:
+        return float(time_str) / 1000
+    except (ValueError, TypeError):
+        pass
+    return None
+
+
+def _countdown_worker():
+    while True:
+        time.sleep(1)
+        with _countdown_lock:
+            if not _countdown_active:
+                continue
+            now = time.time()
+            parts = []
+            finished = []
+            for eid, info in _countdown_active.items():
+                elapsed = now - info['start_time']
+                p_rem = info['p_seconds'] - elapsed
+                s_rem = info['s_seconds'] - elapsed
+                loc = info.get('user_loc', '')
+                if s_rem <= 0:
+                    parts.append(f"[S波已抵达 {loc}]")
+                    finished.append(eid)
+                elif p_rem <= 0:
+                    parts.append(f"[P波已抵达 | S波 {int(s_rem)}秒] {loc}")
+                else:
+                    parts.append(f"[P波 {int(p_rem)}秒 | S波 {int(s_rem)}秒] {loc}")
+            for eid in finished:
+                del _countdown_active[eid]
+            if parts:
+                sys.stdout.write('\r' + ' | '.join(parts))
+                sys.stdout.flush()
+
+
+def start_countdown(event_id, origin_time_str, distance_km, user_loc, magnitude):
+    if USER_LATITUDE is None or USER_LONGITUDE is None:
+        return
+    if distance_km is None or distance_km <= 0:
+        return
+    intensity = estimate_local_intensity(magnitude, distance_km)
+    if intensity is None or intensity <= 0:
+        return
+    global _countdown_thread
+    p_sec, s_sec = calc_wave_arrival(distance_km)
+    if p_sec is None:
+        return
+    start_ts = _parse_origin_time(origin_time_str)
+    if start_ts is None:
+        start_ts = time.time()
+    with _countdown_lock:
+        if event_id in _countdown_active:
+            return
+        _countdown_active[event_id] = {
+            'p_seconds': p_sec,
+            's_seconds': s_sec,
+            'start_time': start_ts,
+            'user_loc': user_loc or USER_LOCATION_NAME or ''
+        }
+    if _countdown_thread is None or not _countdown_thread.is_alive():
+        _countdown_thread = threading.Thread(target=_countdown_worker, daemon=True)
+        _countdown_thread.start()
+
+
 # ================== 配置文件路径（持久化） ==================
 CONFIG_FILE = "config.json"
 
@@ -158,7 +296,8 @@ def build_default_config():
         'sources': {},
         'filters': {key: dict(val) for key, val in FILTER_DETAIL.items()},
         'export_path': None,
-        'debug': False
+        'debug': False,
+        'location': {'name': None, 'latitude': None, 'longitude': None}
     }
     for key, cfg in SOURCE_CONFIG.items():
         src = {'enabled': cfg['enabled']}
@@ -209,7 +348,12 @@ def save_config():
         'sources': {},
         'filters': {key: dict(val) for key, val in FILTER_DETAIL.items()},
         'export_path': EXPORT_FILE_PATH,
-        'debug': DEBUG
+        'debug': DEBUG,
+        'location': {
+            'name': USER_LOCATION_NAME,
+            'latitude': USER_LATITUDE,
+            'longitude': USER_LONGITUDE
+        }
     }
     for key, cfg in SOURCE_CONFIG.items():
         src = {'enabled': cfg['enabled']}
@@ -229,6 +373,7 @@ def save_config():
 
 def apply_config(config):
     global SOURCE_CONFIG, FILTER_DETAIL, EXPORT_FILE_PATH, FAN_RECONNECT_DELAY, DEBUG
+    global USER_LOCATION_NAME, USER_LATITUDE, USER_LONGITUDE
     sources_cfg = config.get('sources', {})
     for key, src_cfg in sources_cfg.items():
         if key in SOURCE_CONFIG:
@@ -250,6 +395,19 @@ def apply_config(config):
         FAN_RECONNECT_DELAY = config['fan_reconnect_delay']
     if 'debug' in config:
         DEBUG = config['debug']
+    loc = config.get('location', {})
+    if loc:
+        USER_LOCATION_NAME = loc.get('name') or None
+        try:
+            USER_LATITUDE = float(loc['latitude']) if loc.get('latitude') is not None else None
+        except (ValueError, TypeError):
+            USER_LATITUDE = None
+        try:
+            USER_LONGITUDE = float(loc['longitude']) if loc.get('longitude') is not None else None
+        except (ValueError, TypeError):
+            USER_LONGITUDE = None
+        if DEBUG:
+            console.print(f"[dim][DEBUG] 用户位置: {USER_LOCATION_NAME} ({USER_LATITUDE}, {USER_LONGITUDE})[/dim]")
 
 
 # ================== 数据源配置 ==================
@@ -257,7 +415,7 @@ SOURCE_CONFIG = {
     'wolfx': {
         'name': 'Wolfx',
         'url': 'wss://ws-api.wolfx.jp/all_eew',
-        'enabled': true,
+        'enabled': True,
         'type': 'all',
         'need_subscribe': False,
         'fallback_urls': []
@@ -373,6 +531,17 @@ p2pjson_reconnect_delay = 5
 
 processed_events = set()
 high_intensity_state = {}
+
+# 用户所在地配置（用于距离/烈度/波到着计算）
+USER_LOCATION_NAME = None
+USER_LATITUDE = None
+USER_LONGITUDE = None
+
+# 动态P/S波倒计时管理
+_countdown_active = {}
+_countdown_thread = None
+_countdown_lock = threading.Lock()
+
 console = Console()
 _console_print = console.print
 
@@ -505,6 +674,7 @@ def process_fan_data(data, sub_type, source_label):
     lat = safe_get(data, 'latitude', 'Latitude')
     lon = safe_get(data, 'longitude', 'Longitude')
     rows.append(["坐标", f"{lat}, {lon}" if lat and lon else '未知'])
+    add_location_rows(rows, lat, lon, safe_get(data, 'magnitude', 'Magunitude'))
     rows.append(["震级(M)", safe_get(data, 'magnitude', 'Magunitude')])
     rows.append(["深度(km)", safe_get(data, 'depth', 'Depth')])
     if sub_type in ('jma', 'nied', 'p2p', 'p2pjson'):
@@ -577,6 +747,7 @@ def process_jma_eew(data, source_key, source_label):
     lat = safe_get(data, 'Latitude', 'latitude')
     lon = safe_get(data, 'Longitude', 'longitude')
     rows.append(["坐标", f"{lat}, {lon}" if lat and lon else '未知'])
+    add_location_rows(rows, lat, lon, safe_get(data, 'Magunitude', 'magnitude'))
     rows.append(["震级(M)", safe_get(data, 'Magunitude', 'magnitude')])
     rows.append(["深度(km)", safe_get(data, 'Depth', 'depth')])
     rows.append(["最大震度(日本)", max_intensity])
@@ -606,6 +777,9 @@ def process_jma_eew(data, source_key, source_label):
         rows.append(["警报区域示例", "无具体区域"])
 
     print_earthquake_table("地震预警速报 (日本气象厅 JMA)", rows, source_label)
+    dist = haversine(lat, lon, USER_LATITUDE, USER_LONGITUDE) if lat and lon and USER_LATITUDE else None
+    if dist is not None:
+        start_countdown(f"jma_{event_id}", origin_time, dist, USER_LOCATION_NAME, safe_get(data, 'Magunitude', 'magnitude'))
 
 
 def process_cenc_eew(data, source_key, source_label):
@@ -627,6 +801,7 @@ def process_cenc_eew(data, source_key, source_label):
     lat = safe_get(data, 'Latitude', 'latitude')
     lon = safe_get(data, 'Longitude', 'longitude')
     rows.append(["坐标", f"{lat}, {lon}" if lat and lon else '未知'])
+    add_location_rows(rows, lat, lon, safe_get(data, 'Magnitude', 'Magunitude', 'magnitude'))
     rows.append(["震级(M)", safe_get(data, 'Magnitude', 'Magunitude', 'magnitude')])
     rows.append(["深度(km)", safe_get(data, 'Depth', 'depth')])
     rows.append(["速报序号", str(data.get('ReportNum', 'N/A'))])
@@ -634,6 +809,9 @@ def process_cenc_eew(data, source_key, source_label):
     rows.append(["最终报", "是" if data.get('isFinal', data.get('is_final', False)) else "否"])
 
     print_earthquake_table("地震情报 (中国地震台网中心 CENC)", rows, source_label)
+    dist = haversine(lat, lon, USER_LATITUDE, USER_LONGITUDE) if lat and lon and USER_LATITUDE else None
+    if dist is not None:
+        start_countdown(f"cenc_{event_id}", safe_get(data, 'OriginTime', 'origin_time', 'shockTime'), dist, USER_LOCATION_NAME, safe_get(data, 'Magnitude', 'Magunitude', 'magnitude'))
 
 
 def process_sc_eew(data, source_key, source_label):
@@ -651,6 +829,7 @@ def process_sc_eew(data, source_key, source_label):
     lat = safe_get(data, 'Latitude', 'latitude')
     lon = safe_get(data, 'Longitude', 'longitude')
     rows.append(["坐标", f"{lat}, {lon}" if lat and lon else '未知'])
+    add_location_rows(rows, lat, lon, safe_get(data, 'Magunitude', 'magnitude'))
     rows.append(["震级(M)", safe_get(data, 'Magunitude', 'magnitude')])
     rows.append(["深度(km)", safe_get(data, 'Depth', 'depth')])
     rows.append(["速报序号", str(data.get('ReportNum', 'N/A'))])
@@ -658,6 +837,9 @@ def process_sc_eew(data, source_key, source_label):
     rows.append(["警报触发", "是" if data.get('isWarn', False) else "否"])
 
     print_earthquake_table("地震测定报 (四川省地震局 SC)", rows, source_label)
+    dist = haversine(lat, lon, USER_LATITUDE, USER_LONGITUDE) if lat and lon and USER_LATITUDE else None
+    if dist is not None:
+        start_countdown(f"sc_{event_id}", safe_get(data, 'OriginTime', 'origin_time'), dist, USER_LOCATION_NAME, safe_get(data, 'Magunitude', 'magnitude'))
 
 
 def process_fj_eew(data, source_key, source_label):
@@ -675,11 +857,15 @@ def process_fj_eew(data, source_key, source_label):
     lat = safe_get(data, 'Latitude', 'latitude')
     lon = safe_get(data, 'Longitude', 'longitude')
     rows.append(["坐标", f"{lat}, {lon}" if lat and lon else '未知'])
+    add_location_rows(rows, lat, lon, safe_get(data, 'Magunitude', 'magnitude'))
     rows.append(["震级(M)", safe_get(data, 'Magunitude', 'magnitude')])
     rows.append(["速报序号", str(data.get('ReportNum', 'N/A'))])
     rows.append(["最终报", "是" if data.get('isFinal', False) else "否"])
 
     print_earthquake_table("地震测定报 (福建省地震局 FJ)", rows, source_label)
+    dist = haversine(lat, lon, USER_LATITUDE, USER_LONGITUDE) if lat and lon and USER_LATITUDE else None
+    if dist is not None:
+        start_countdown(f"fj_{event_id}", safe_get(data, 'OriginTime', 'origin_time'), dist, USER_LOCATION_NAME, safe_get(data, 'Magunitude', 'magnitude'))
 
 
 def process_cq_eew(data, source_key, source_label):
@@ -697,12 +883,16 @@ def process_cq_eew(data, source_key, source_label):
     lat = safe_get(data, 'Latitude', 'latitude')
     lon = safe_get(data, 'Longitude', 'longitude')
     rows.append(["坐标", f"{lat}, {lon}" if lat and lon else '未知'])
+    add_location_rows(rows, lat, lon, safe_get(data, 'Magnitude', 'Magunitude', 'magnitude'))
     rows.append(["震级(M)", safe_get(data, 'Magnitude', 'Magunitude', 'magnitude')])
     rows.append(["深度(km)", safe_get(data, 'Depth', 'depth')])
     rows.append(["速报序号", str(data.get('ReportNum', 'N/A'))])
     rows.append(["最大烈度(中国)", get_intensity_display(data, 'cenc')])
 
     print_earthquake_table("地震测定报 (重庆市地震局 CQ)", rows, source_label)
+    dist = haversine(lat, lon, USER_LATITUDE, USER_LONGITUDE) if lat and lon and USER_LATITUDE else None
+    if dist is not None:
+        start_countdown(f"cq_{event_id}", safe_get(data, 'OriginTime', 'origin_time'), dist, USER_LOCATION_NAME, safe_get(data, 'Magnitude', 'Magunitude', 'magnitude'))
 
 
 def process_cenc_eqlist(data, source_key, source_label):
@@ -726,13 +916,7 @@ def process_cenc_eqlist(data, source_key, source_label):
         lat = safe_get(entry, 'latitude', 'Latitude')
         lon = safe_get(entry, 'longitude', 'Longitude')
         rows.append(["坐标", f"{lat}, {lon}" if lat and lon else '未知'])
-        rows.append(["震级(M)", safe_get(entry, 'magnitude', 'Magunitude')])
-        rows.append(["深度(km)", safe_get(entry, 'depth', 'Depth')])
-        rows.append(["最大烈度", safe_get(entry, 'intensity', 'MaxIntensity', 'N/A')])
-        rows.append(["信息类型", safe_get(entry, 'type', 'N/A')])
-        lat = safe_get(entry, 'latitude', 'Latitude')
-        lon = safe_get(entry, 'longitude', 'Longitude')
-        rows.append(["坐标", f"{lat}, {lon}" if lat and lon else '未知'])
+        add_location_rows(rows, lat, lon, safe_get(entry, 'magnitude', 'Magunitude'))
         rows.append(["震级(M)", safe_get(entry, 'magnitude', 'Magunitude')])
         rows.append(["深度(km)", safe_get(entry, 'depth', 'Depth')])
         rows.append(["最大烈度", safe_get(entry, 'intensity', 'MaxIntensity', 'N/A')])
@@ -754,6 +938,7 @@ def process_cea_eew(data, source_key, source_label):
     lat = safe_get(data, 'latitude', 'Latitude')
     lon = safe_get(data, 'longitude', 'Longitude')
     rows.append(["坐标", f"{lat}, {lon}" if lat and lon else '未知'])
+    add_location_rows(rows, lat, lon, safe_get(data, 'magnitude', 'Magunitude'))
     rows.append(["震级(M)", safe_get(data, 'magnitude', 'Magunitude')])
     rows.append(["深度(km)", safe_get(data, 'depth', 'Depth')])
     rows.append(["预估烈度", get_intensity_display(data, 'cenc')])
@@ -774,6 +959,7 @@ def process_cwa_eew(data, source_key, source_label):
     lat = safe_get(data, 'latitude', 'Latitude')
     lon = safe_get(data, 'longitude', 'Longitude')
     rows.append(["坐标", f"{lat}, {lon}" if lat and lon else '未知'])
+    add_location_rows(rows, lat, lon, safe_get(data, 'magnitude', 'Magunitude'))
     rows.append(["震级(M)", safe_get(data, 'magnitude', 'Magunitude')])
     rows.append(["深度(km)", safe_get(data, 'depth', 'Depth')])
     rows.append(["最大震度", get_intensity_display(data, 'cenc')])
@@ -781,6 +967,9 @@ def process_cwa_eew(data, source_key, source_label):
     rows.append(["影响区域", ', '.join(affected) if affected else '无'])
 
     print_earthquake_table("地震预警速报 (台湾气象署 CWA-EEW)", rows, source_label)
+    dist = haversine(lat, lon, USER_LATITUDE, USER_LONGITUDE) if lat and lon and USER_LATITUDE else None
+    if dist is not None:
+        start_countdown(f"cwa_{event_id}", safe_get(data, 'shockTime', 'OriginTime'), dist, USER_LOCATION_NAME, safe_get(data, 'magnitude', 'Magunitude'))
 
 
 def process_cwa_report(data, source_key, source_label):
@@ -796,11 +985,15 @@ def process_cwa_report(data, source_key, source_label):
     lat = safe_get(data, 'latitude', 'Latitude')
     lon = safe_get(data, 'longitude', 'Longitude')
     rows.append(["坐标", f"{lat}, {lon}" if lat and lon else '未知'])
+    add_location_rows(rows, lat, lon, safe_get(data, 'magnitude', 'Magunitude'))
     rows.append(["震级(M)", safe_get(data, 'magnitude', 'Magunitude')])
     rows.append(["深度(km)", safe_get(data, 'depth', 'Depth')])
     rows.append(["最大震度", get_intensity_display(data, 'cenc')])
 
     print_earthquake_table("地震报告 (台湾气象署 CWA)", rows, source_label)
+    dist = haversine(lat, lon, USER_LATITUDE, USER_LONGITUDE) if lat and lon and USER_LATITUDE else None
+    if dist is not None:
+        start_countdown(f"cwa_rpt_{event_id}", safe_get(data, 'shockTime', 'OriginTime'), dist, USER_LOCATION_NAME, safe_get(data, 'magnitude', 'Magunitude'))
 
 
 def process_provincial_eew(data, source_key, source_label, province_name):
@@ -816,11 +1009,15 @@ def process_provincial_eew(data, source_key, source_label, province_name):
     lat = safe_get(data, 'latitude', 'Latitude')
     lon = safe_get(data, 'longitude', 'Longitude')
     rows.append(["坐标", f"{lat}, {lon}" if lat and lon else '未知'])
+    add_location_rows(rows, lat, lon, safe_get(data, 'magnitude', 'Magunitude'))
     rows.append(["震级(M)", safe_get(data, 'magnitude', 'Magunitude')])
     rows.append(["深度(km)", safe_get(data, 'depth', 'Depth')])
     rows.append(["最大烈度", get_intensity_display(data, 'cenc')])
 
     print_earthquake_table(f"地震测定报 ({province_name}省地震局)", rows, source_label)
+    dist = haversine(lat, lon, USER_LATITUDE, USER_LONGITUDE) if lat and lon and USER_LATITUDE else None
+    if dist is not None:
+        start_countdown(f"prov_{event_id}", safe_get(data, 'shockTime', 'OriginTime'), dist, USER_LOCATION_NAME, safe_get(data, 'magnitude', 'Magunitude'))
 
 
 def process_hko_eew(data, source_key, source_label):
@@ -836,12 +1033,16 @@ def process_hko_eew(data, source_key, source_label):
     lat = safe_get(data, 'latitude', 'Latitude')
     lon = safe_get(data, 'longitude', 'Longitude')
     rows.append(["坐标", f"{lat}, {lon}" if lat and lon else '未知'])
+    add_location_rows(rows, lat, lon, safe_get(data, 'magnitude', 'Magunitude'))
     rows.append(["震级(M)", safe_get(data, 'magnitude', 'Magunitude')])
     rows.append(["深度(km)", safe_get(data, 'depth', 'Depth')])
     rows.append(["最大震度/烈度", get_intensity_display(data, 'cenc')])
     rows.append(["区域", safe_get(data, 'region', 'citystring')])
 
     print_earthquake_table("地震报告 (香港天文台 HKO)", rows, source_label)
+    dist = haversine(lat, lon, USER_LATITUDE, USER_LONGITUDE) if lat and lon and USER_LATITUDE else None
+    if dist is not None:
+        start_countdown(f"hko_{event_id}", safe_get(data, 'shockTime', 'OriginTime'), dist, USER_LOCATION_NAME, safe_get(data, 'magnitude', 'Magunitude'))
 
 
 def process_usgs_eew(data, source_key, source_label):
@@ -857,12 +1058,16 @@ def process_usgs_eew(data, source_key, source_label):
     lat = safe_get(data, 'latitude', 'Latitude')
     lon = safe_get(data, 'longitude', 'Longitude')
     rows.append(["坐标", f"{lat}, {lon}" if lat and lon else '未知'])
+    add_location_rows(rows, lat, lon, safe_get(data, 'magnitude', 'Magunitude'))
     rows.append(["震级(M)", safe_get(data, 'magnitude', 'Magunitude')])
     rows.append(["深度(km)", safe_get(data, 'depth', 'Depth')])
     rows.append(["最大震度/烈度", get_intensity_display(data, 'cenc')])
     rows.append(["标题", safe_get(data, 'title')])
 
     print_earthquake_table("地震测定报 (USGS)", rows, source_label)
+    dist = haversine(lat, lon, USER_LATITUDE, USER_LONGITUDE) if lat and lon and USER_LATITUDE else None
+    if dist is not None:
+        start_countdown(f"usgs_{event_id}", safe_get(data, 'shockTime', 'OriginTime'), dist, USER_LOCATION_NAME, safe_get(data, 'magnitude', 'Magunitude'))
 
 
 def process_generic_eew(data, source_key, source_label, data_type):
@@ -878,11 +1083,15 @@ def process_generic_eew(data, source_key, source_label, data_type):
     lat = safe_get(data, 'latitude', 'Latitude')
     lon = safe_get(data, 'longitude', 'Longitude')
     rows.append(["坐标", f"{lat}, {lon}" if lat and lon else '未知'])
+    add_location_rows(rows, lat, lon, safe_get(data, 'magnitude', 'Magunitude'))
     rows.append(["震级(M)", safe_get(data, 'magnitude', 'Magunitude')])
     rows.append(["深度(km)", safe_get(data, 'depth', 'Depth')])
     rows.append(["最大震度/烈度", get_intensity_display(data, 'cenc')])
 
     print_earthquake_table(f"地震报告 ({data_type})", rows, source_label)
+    dist = haversine(lat, lon, USER_LATITUDE, USER_LONGITUDE) if lat and lon and USER_LATITUDE else None
+    if dist is not None:
+        start_countdown(f"generic_{event_id}", safe_get(data, 'shockTime', 'OriginTime', 'origin_time'), dist, USER_LOCATION_NAME, safe_get(data, 'magnitude', 'Magunitude'))
 
 
 # ---------- 统一入口 ----------
@@ -999,9 +1208,9 @@ def process_p2p_quake(data):
         lon = hypocenter.get('longitude')
         if lat and lon and lat != -200 and lon != -200:
             rows.append(["坐标", f"{lat}, {lon}"])
+            add_location_rows(rows, lat, lon, hypocenter.get('magnitude', -1))
         else:
             rows.append(["坐标", "不明"])
-        rows.append(["震级(M)", hypocenter.get('magnitude', -1)])
         rows.append(["深度(km)", hypocenter.get('depth', 'N/A')])
 
         # 处理不同类型的 551 消息
@@ -1071,6 +1280,9 @@ def process_p2p_quake(data):
 
         print_earthquake_table(title, rows, "P2P JSON API")
         play_sound(SOUND_ALERT, is_nhk=False)
+        dist = haversine(lat, lon, USER_LATITUDE, USER_LONGITUDE) if lat and lon and lat != -200 and lon != -200 and USER_LATITUDE else None
+        if dist is not None:
+            start_countdown(f"p2p_{quake_id}", origin_time, dist, USER_LOCATION_NAME, hypocenter.get('magnitude', -1))
 
     except Exception as e:
         console.print(f"[red]P2P 地震处理异常: {e}[/red]")
@@ -1651,22 +1863,16 @@ def on_message_factory(source_key):
                 return
             msg_type = data.get('type', '')
             if msg_type == 'heartbeat':
-                if DEBUG and not _heartbeat_shown:
+                if not _heartbeat_shown:
                     _heartbeat_shown = True
                     ts = data.get('timestamp', 0)
                     if ts:
                         delay = abs(int(time.time() * 1000 - int(ts)))
-                        console.print(f"[dim][DEBUG] Wolfx 心跳 (延迟: {delay}ms)[/dim]")
-                    else:
-                        console.print("[dim][DEBUG] Wolfx 心跳[/dim]")
+                        console.print(f"\033[1A\033[K[green]{source_key} WebSocket 已连接 ({SOURCE_CONFIG[source_key]['name']}，延迟{delay}ms)[/green]")
                 try:
                     ws.send("ping")
                 except:
                     pass
-                return
-            if msg_type == 'pong':
-                if DEBUG:
-                    console.print("[dim][DEBUG] Wolfx Pong[/dim]")
                 return
             if msg_type.endswith('_eew'):
                 data['type'] = msg_type[:-4]
