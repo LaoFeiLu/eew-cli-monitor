@@ -10,6 +10,7 @@ import socket
 import csv
 import re
 import math
+import subprocess
 from datetime import datetime
 from rich.console import Console
 from rich.table import Table
@@ -40,34 +41,21 @@ def resource_path(relative_path):
 
 
 SOUND_ALERT = resource_path("sounds/alert.wav")
-SOUND_NHK = resource_path("sounds/nhk_bell.wav")
-NHK_BLOCK_DURATION = 6.0
-nhk_block_until = 0.0
+SOUND_COUNTDOWN = resource_path("sounds/countdown.wav")
+SOUND_EEW0 = resource_path("sounds/EEW0.wav")
+SOUND_EEW1 = resource_path("sounds/EEW1.wav")
+SOUND_EEW2 = resource_path("sounds/EEW2.wav")
 
 
-def play_sound(file_path, is_nhk=False):
-    global nhk_block_until
+def play_sound(file_path):
     if not os.path.exists(file_path):
         return
-    if is_nhk:
-        try:
-            winsound.PlaySound(file_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
-            nhk_block_until = time.time() + NHK_BLOCK_DURATION
-            if DEBUG:
-                console.print("[dim][DEBUG] 播放NHK铃声[/dim]")
-        except Exception:
-            pass
-    else:
-        if time.time() < nhk_block_until:
-            if DEBUG:
-                console.print("[dim][DEBUG] 音频被NHK冷却阻止[/dim]")
-            return
-        try:
-            winsound.PlaySound(file_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
-            if DEBUG:
-                console.print("[dim][DEBUG] 播放提示音: alert.wav[/dim]")
-        except Exception:
-            pass
+    try:
+        winsound.PlaySound(file_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+        if DEBUG:
+            console.print(f"[dim][DEBUG] 播放音效: {os.path.basename(file_path)}[/dim]")
+    except Exception:
+        pass
 
 
 def is_high_intensity(intensity_str):
@@ -296,6 +284,134 @@ def start_countdown(event_id, origin_time_str, distance_km, user_loc, magnitude,
         _countdown_thread.start()
 
 
+# ================== 预警通知系统 ==================
+
+def get_alert_tier(intensity, tiers=None):
+    if intensity is None:
+        return None
+    if tiers is None:
+        tiers = ALERT_TIERS
+    if intensity == 0:
+        return 0
+    t1 = tiers.get('tier1', {})
+    if t1 and t1.get('min', 1.0) <= intensity < t1.get('max', 2.0):
+        return 1
+    t2 = tiers.get('tier2', {})
+    if t2 and t2.get('min', 2.0) <= intensity < t2.get('max', 3.0):
+        return 2
+    t3 = tiers.get('tier3', {})
+    if t3 and intensity >= t3.get('min', 3.0):
+        return 3
+    if intensity > 0:
+        return -1
+    return None
+
+
+def send_bark(title, subtitle, body, level='passive', **extras):
+    url = ALERT_BARK_URL
+    if not url:
+        return False
+    payload = {
+        'title': title,
+        'subtitle': subtitle,
+        'body': body,
+        'group': '灾害预警-CLI',
+        'level': level,
+    }
+    payload.update(extras)
+    try:
+        resp = requests.post(url, json=payload, timeout=5)
+        if DEBUG:
+            console.print(f"[dim][DEBUG] Bark推送结果: HTTP {resp.status_code}[/dim]")
+        return resp.ok
+    except Exception as e:
+        if DEBUG:
+            console.print(f"[dim][DEBUG] Bark推送失败: {e}[/dim]")
+        return False
+
+
+def show_windows_notification(title, message):
+    if not WINDOWS:
+        return False
+    try:
+        ps = f'''
+$title = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
+$template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
+$textNodes = $template.GetElementsByTagName("text")
+$textNodes.Item(0).AppendChild($template.CreateTextNode("{title}")) > $null
+$textNodes.Item(1).AppendChild($template.CreateTextNode("{message}")) > $null
+$toast = [Windows.UI.Notifications.ToastNotification]::new($template)
+[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("EEW-CLI-Monitor").Show($toast)
+'''
+        subprocess.run(["powershell", "-Command", ps], capture_output=True, timeout=10)
+        return True
+    except Exception as e:
+        if DEBUG:
+            console.print(f"[dim][DEBUG] Windows通知失败: {e}[/dim]")
+        return False
+
+
+def trigger_alert(source_label, origin_name, magnitude, depth,
+                  distance_km, local_intensity, max_intensity,
+                  origin_time, p_seconds, s_seconds, event_id):
+    loc_name = USER_LOCATION_NAME or f"{USER_LATITUDE},{USER_LONGITUDE}"
+    tier = get_alert_tier(local_intensity)
+    tiers_config = ALERT_TIERS
+
+    # 音效
+    if tier == 0:
+        play_sound(SOUND_COUNTDOWN)
+    elif tier is None or tier == -1:
+        play_sound(SOUND_ALERT)
+    elif tier == 1:
+        play_sound(SOUND_EEW0)
+    elif tier == 2:
+        play_sound(SOUND_EEW1)
+    elif tier == 3:
+        play_sound(SOUND_EEW2)
+
+    # Windows通知
+    win_msg = (f"发震时刻: {origin_time}\n"
+               f"震中: {origin_name}\n"
+               f"深度: {depth}km\n"
+               f"震级: M{magnitude}\n"
+               f"最大烈度: {max_intensity}\n"
+               f"P波: {p_seconds}秒后到达 | S波: {s_seconds}秒后到达\n"
+               f"距离{loc_name}: {distance_km:.0f}km\n"
+               f"本地预估烈度: {local_intensity}度\n"
+               f"信号源: {source_label}")
+    show_windows_notification(f"地震预警 预计烈度{local_intensity}", win_msg)
+
+    # Bark
+    if tier is not None and tier != 0:
+        tier_cfg = tiers_config.get(f'tier{tier}', {}) if tier > 0 else {}
+        bark_enabled = tier_cfg.get('bark', True) if tier > 0 else True
+        if ALERT_BARK_URL and bark_enabled:
+            if tier == -1 or tier == 1:
+                send_bark(
+                    title=f"地震预警 {origin_name} {s_seconds}秒后到达",
+                    subtitle=f"预计烈度 {local_intensity}",
+                    body=f"距离震中 {distance_km:.0f}km，S波预计 {s_seconds}秒后到达",
+                    level="passive"
+                )
+            elif tier == 2:
+                send_bark(
+                    title=f"地震预警 {origin_name} {p_seconds}秒后到达",
+                    subtitle=f"震级 M{magnitude} 深度 {depth}km，预估烈度 {local_intensity}",
+                    body=f"预计 {p_seconds}秒后到达",
+                    level="active",
+                    volume=10, call="1", sound="alarm"
+                )
+            elif tier == 3:
+                send_bark(
+                    title=f"地震预警 {origin_name} {p_seconds}秒后到达",
+                    subtitle=f"震级 M{magnitude} 深度 {depth}km，预估烈度 {local_intensity}",
+                    body=f"预计 {p_seconds}秒后到达",
+                    level="critical",
+                    volume=10, call="1", sound="alarm"
+                )
+
+
 # ================== 配置文件路径（持久化） ==================
 CONFIG_FILE = "config.json"
 
@@ -306,7 +422,15 @@ def build_default_config():
         'filters': {key: dict(val) for key, val in FILTER_DETAIL.items()},
         'export_path': None,
         'debug': False,
-        'location': {'name': None, 'latitude': None, 'longitude': None}
+        'location': {'name': None, 'latitude': None, 'longitude': None},
+        'alert': {
+            'bark_url': None,
+            'tiers': {
+                'tier1': {'min': 1.0, 'max': 2.0, 'windows': True, 'bark': True},
+                'tier2': {'min': 2.0, 'max': 3.0, 'windows': True, 'bark': True},
+                'tier3': {'min': 3.0, 'max': 12.0, 'windows': True, 'bark': True},
+            }
+        }
     }
     for key, cfg in SOURCE_CONFIG.items():
         src = {'enabled': cfg['enabled']}
@@ -362,6 +486,10 @@ def save_config():
             'name': USER_LOCATION_NAME,
             'latitude': USER_LATITUDE,
             'longitude': USER_LONGITUDE
+        },
+        'alert': {
+            'bark_url': ALERT_BARK_URL,
+            'tiers': {k: dict(v) for k, v in ALERT_TIERS.items()}
         }
     }
     for key, cfg in SOURCE_CONFIG.items():
@@ -383,6 +511,7 @@ def save_config():
 def apply_config(config):
     global SOURCE_CONFIG, FILTER_DETAIL, EXPORT_FILE_PATH, FAN_RECONNECT_DELAY, DEBUG
     global USER_LOCATION_NAME, USER_LATITUDE, USER_LONGITUDE
+    global ALERT_BARK_URL, ALERT_TIERS
     sources_cfg = config.get('sources', {})
     for key, src_cfg in sources_cfg.items():
         if key in SOURCE_CONFIG:
@@ -417,6 +546,11 @@ def apply_config(config):
             USER_LONGITUDE = None
         if DEBUG:
             console.print(f"[dim][DEBUG] 用户位置: {USER_LOCATION_NAME} ({USER_LATITUDE}, {USER_LONGITUDE})[/dim]")
+    alert_cfg = config.get('alert', {})
+    ALERT_BARK_URL = alert_cfg.get('bark_url') or None
+    ALERT_TIERS = alert_cfg.get('tiers', {})
+    if DEBUG:
+        console.print(f"[dim][DEBUG] 预警配置: bark_url={'已设置' if ALERT_BARK_URL else '未设置'}, tiers={list(ALERT_TIERS.keys())}[/dim]")
 
 
 # ================== 数据源配置 ==================
@@ -539,12 +673,15 @@ fan_last_reconnect_time = 0
 p2pjson_reconnect_delay = 5
 
 processed_events = set()
-high_intensity_state = {}
 
 # 用户所在地配置（用于距离/烈度/波到着计算）
 USER_LOCATION_NAME = None
 USER_LATITUDE = None
 USER_LONGITUDE = None
+
+# 预警配置
+ALERT_BARK_URL = None
+ALERT_TIERS = {}
 
 # 动态P/S波倒计时管理
 _countdown_active = {}
@@ -670,7 +807,7 @@ def process_tsunami(data, source_label):
                 table.add_row(row[0], str(row[1]))
             console.print(table)
             write_table_to_csv("海啸预警 (自然资源部)", rows)
-            play_sound(SOUND_ALERT, is_nhk=False)
+            play_sound(SOUND_ALERT)
     except Exception as e:
         console.print(f"[red]海啸预警解析错误: {e}[/red]")
 
@@ -718,12 +855,10 @@ def process_fan_data(data, sub_type, source_label):
 
     if rows:
         print_earthquake_table(title, rows, source_label)
-        play_sound(SOUND_ALERT, is_nhk=False)
 
 
 # ---------- Wolfx 各处理函数 ----------
 def process_jma_eew(data, source_key, source_label):
-    global nhk_block_until
     event_id = safe_get(data, 'EventID', 'id', default='')
     if not event_id:
         if DEBUG:
@@ -742,13 +877,6 @@ def process_jma_eew(data, source_key, source_label):
     processed_events.add(report_key)
 
     max_intensity = safe_get(data, 'MaxIntensity', 'epiIntensity', default='N/A')
-    current_high = is_high_intensity(str(max_intensity))
-    prev_high = high_intensity_state.get(event_id, False)
-
-    play_sound(SOUND_ALERT, is_nhk=False)
-    if current_high and not prev_high:
-        play_sound(SOUND_NHK, is_nhk=True)
-    high_intensity_state[event_id] = current_high
 
     rows = []
     rows.append(["发震时刻", origin_time])
@@ -788,7 +916,15 @@ def process_jma_eew(data, source_key, source_label):
     print_earthquake_table("地震预警速报 (日本气象厅 JMA)", rows, source_label)
     dist = haversine(lat, lon, USER_LATITUDE, USER_LONGITUDE) if lat and lon and USER_LATITUDE else None
     if dist is not None:
-        start_countdown(f"jma_{event_id}", origin_time, dist, USER_LOCATION_NAME, safe_get(data, 'Magunitude', 'magnitude'), safe_get(data, 'Hypocenter', 'placeName', 'region_name'))
+        mag_val = safe_get(data, 'Magunitude', 'magnitude')
+        origin_name = safe_get(data, 'Hypocenter', 'placeName', 'region_name')
+        depth_val = safe_get(data, 'Depth', 'depth')
+        p_sec, s_sec = calc_wave_arrival(dist)
+        local_int = estimate_local_intensity(mag_val, dist)
+        trigger_alert(source_label, origin_name, mag_val, depth_val, dist,
+                      local_int, max_intensity, origin_time, p_sec, s_sec, event_id)
+        if local_int and local_int > 0:
+            start_countdown(f"jma_{event_id}", origin_time, dist, USER_LOCATION_NAME, mag_val, origin_name)
 
 
 def process_cenc_eew(data, source_key, source_label):
@@ -800,7 +936,6 @@ def process_cenc_eew(data, source_key, source_label):
     if event_id in processed_events:
         return
     processed_events.add(event_id)
-    play_sound(SOUND_ALERT, is_nhk=False)
 
     rows = []
     rows.append(["ID", safe_get(data, 'ID', default='N/A')])
@@ -820,7 +955,17 @@ def process_cenc_eew(data, source_key, source_label):
     print_earthquake_table("地震情报 (中国地震台网中心 CENC)", rows, source_label)
     dist = haversine(lat, lon, USER_LATITUDE, USER_LONGITUDE) if lat and lon and USER_LATITUDE else None
     if dist is not None:
-        start_countdown(f"cenc_{event_id}", safe_get(data, 'OriginTime', 'origin_time', 'shockTime'), dist, USER_LOCATION_NAME, safe_get(data, 'Magnitude', 'Magunitude', 'magnitude'), safe_get(data, 'HypoCenter', 'Hypocenter', 'hypocenter', 'placeName'))
+        mag_val = safe_get(data, 'Magnitude', 'Magunitude', 'magnitude')
+        origin_name = safe_get(data, 'HypoCenter', 'Hypocenter', 'hypocenter', 'placeName')
+        ot = safe_get(data, 'OriginTime', 'origin_time', 'shockTime')
+        depth_val = safe_get(data, 'Depth', 'depth')
+        max_int = safe_get(data, 'MaxIntensity', 'epiIntensity', default='N/A')
+        p_sec, s_sec = calc_wave_arrival(dist)
+        local_int = estimate_local_intensity(mag_val, dist)
+        trigger_alert(source_label, origin_name, mag_val, depth_val, dist,
+                      local_int, max_int, ot, p_sec, s_sec, event_id)
+        if local_int and local_int > 0:
+            start_countdown(f"cenc_{event_id}", ot, dist, USER_LOCATION_NAME, mag_val, origin_name)
 
 
 def process_sc_eew(data, source_key, source_label):
@@ -828,7 +973,6 @@ def process_sc_eew(data, source_key, source_label):
     if not event_id or event_id in processed_events:
         return
     processed_events.add(event_id)
-    play_sound(SOUND_ALERT, is_nhk=False)
 
     rows = []
     rows.append(["ID", safe_get(data, 'ID', default='N/A')])
@@ -848,7 +992,17 @@ def process_sc_eew(data, source_key, source_label):
     print_earthquake_table("地震测定报 (四川省地震局 SC)", rows, source_label)
     dist = haversine(lat, lon, USER_LATITUDE, USER_LONGITUDE) if lat and lon and USER_LATITUDE else None
     if dist is not None:
-        start_countdown(f"sc_{event_id}", safe_get(data, 'OriginTime', 'origin_time'), dist, USER_LOCATION_NAME, safe_get(data, 'Magunitude', 'magnitude'), safe_get(data, 'HypoCenter', 'Hypocenter', 'placeName'))
+        mag_val = safe_get(data, 'Magunitude', 'magnitude')
+        origin_name = safe_get(data, 'HypoCenter', 'Hypocenter', 'placeName')
+        ot = safe_get(data, 'OriginTime', 'origin_time')
+        depth_val = safe_get(data, 'Depth', 'depth')
+        max_int = safe_get(data, 'MaxIntensity', 'epiIntensity', default='N/A')
+        p_sec, s_sec = calc_wave_arrival(dist)
+        local_int = estimate_local_intensity(mag_val, dist)
+        trigger_alert(source_label, origin_name, mag_val, depth_val, dist,
+                      local_int, max_int, ot, p_sec, s_sec, event_id)
+        if local_int and local_int > 0:
+            start_countdown(f"sc_{event_id}", ot, dist, USER_LOCATION_NAME, mag_val, origin_name)
 
 
 def process_fj_eew(data, source_key, source_label):
@@ -856,7 +1010,6 @@ def process_fj_eew(data, source_key, source_label):
     if not event_id or event_id in processed_events:
         return
     processed_events.add(event_id)
-    play_sound(SOUND_ALERT, is_nhk=False)
 
     rows = []
     rows.append(["ID", safe_get(data, 'ID', default='N/A')])
@@ -874,7 +1027,16 @@ def process_fj_eew(data, source_key, source_label):
     print_earthquake_table("地震测定报 (福建省地震局 FJ)", rows, source_label)
     dist = haversine(lat, lon, USER_LATITUDE, USER_LONGITUDE) if lat and lon and USER_LATITUDE else None
     if dist is not None:
-        start_countdown(f"fj_{event_id}", safe_get(data, 'OriginTime', 'origin_time'), dist, USER_LOCATION_NAME, safe_get(data, 'Magunitude', 'magnitude'), safe_get(data, 'HypoCenter', 'Hypocenter', 'placeName'))
+        mag_val = safe_get(data, 'Magunitude', 'magnitude')
+        origin_name = safe_get(data, 'HypoCenter', 'Hypocenter', 'placeName')
+        ot = safe_get(data, 'OriginTime', 'origin_time')
+        depth_val = safe_get(data, 'Depth', 'depth')
+        p_sec, s_sec = calc_wave_arrival(dist)
+        local_int = estimate_local_intensity(mag_val, dist)
+        trigger_alert(source_label, origin_name, mag_val, depth_val, dist,
+                      local_int, None, ot, p_sec, s_sec, event_id)
+        if local_int and local_int > 0:
+            start_countdown(f"fj_{event_id}", ot, dist, USER_LOCATION_NAME, mag_val, origin_name)
 
 
 def process_cq_eew(data, source_key, source_label):
@@ -882,7 +1044,6 @@ def process_cq_eew(data, source_key, source_label):
     if not event_id or event_id in processed_events:
         return
     processed_events.add(event_id)
-    play_sound(SOUND_ALERT, is_nhk=False)
 
     rows = []
     rows.append(["ID", safe_get(data, 'ID', default='N/A')])
@@ -901,7 +1062,17 @@ def process_cq_eew(data, source_key, source_label):
     print_earthquake_table("地震测定报 (重庆市地震局 CQ)", rows, source_label)
     dist = haversine(lat, lon, USER_LATITUDE, USER_LONGITUDE) if lat and lon and USER_LATITUDE else None
     if dist is not None:
-        start_countdown(f"cq_{event_id}", safe_get(data, 'OriginTime', 'origin_time'), dist, USER_LOCATION_NAME, safe_get(data, 'Magnitude', 'Magunitude', 'magnitude'), safe_get(data, 'HypoCenter', 'Hypocenter', 'placeName'))
+        mag_val = safe_get(data, 'Magnitude', 'Magunitude', 'magnitude')
+        origin_name = safe_get(data, 'HypoCenter', 'Hypocenter', 'placeName')
+        ot = safe_get(data, 'OriginTime', 'origin_time')
+        depth_val = safe_get(data, 'Depth', 'depth')
+        max_int = safe_get(data, 'MaxIntensity', 'epiIntensity', default='N/A')
+        p_sec, s_sec = calc_wave_arrival(dist)
+        local_int = estimate_local_intensity(mag_val, dist)
+        trigger_alert(source_label, origin_name, mag_val, depth_val, dist,
+                      local_int, max_int, ot, p_sec, s_sec, event_id)
+        if local_int and local_int > 0:
+            start_countdown(f"cq_{event_id}", ot, dist, USER_LOCATION_NAME, mag_val, origin_name)
 
 
 def process_cenc_eqlist(data, source_key, source_label):
@@ -931,7 +1102,7 @@ def process_cenc_eqlist(data, source_key, source_label):
         rows.append(["最大烈度", safe_get(entry, 'intensity', 'MaxIntensity', 'N/A')])
         rows.append(["信息类型", safe_get(entry, 'type', 'N/A')])
         print_earthquake_table("地震信息 (中国地震台网 CENC 目录)", rows, source_label)
-        play_sound(SOUND_ALERT, is_nhk=False)
+        play_sound(SOUND_ALERT)
 
 
 def process_cea_eew(data, source_key, source_label):
@@ -939,7 +1110,6 @@ def process_cea_eew(data, source_key, source_label):
     if not event_id or event_id in processed_events:
         return
     processed_events.add(event_id)
-    play_sound(SOUND_ALERT, is_nhk=False)
 
     rows = []
     rows.append(["发震时刻", safe_get(data, 'shockTime', 'OriginTime')])
@@ -954,13 +1124,25 @@ def process_cea_eew(data, source_key, source_label):
 
     print_earthquake_table("地震预警速报 (中国地震预警网 CEA)", rows, source_label)
 
+    dist = haversine(lat, lon, USER_LATITUDE, USER_LONGITUDE) if lat and lon and USER_LATITUDE else None
+    if dist is not None:
+        mag_val = safe_get(data, 'magnitude', 'Magunitude')
+        origin_name = safe_get(data, 'placeName', 'Hypocenter')
+        ot = safe_get(data, 'shockTime', 'OriginTime')
+        depth_val = safe_get(data, 'depth', 'Depth')
+        p_sec, s_sec = calc_wave_arrival(dist)
+        local_int = estimate_local_intensity(mag_val, dist)
+        trigger_alert(source_label, origin_name, mag_val, depth_val, dist,
+                      local_int, None, ot, p_sec, s_sec, event_id)
+        if local_int and local_int > 0:
+            start_countdown(f"cea_{event_id}", ot, dist, USER_LOCATION_NAME, mag_val, origin_name)
+
 
 def process_cwa_eew(data, source_key, source_label):
     event_id = safe_get(data, 'id', default='')
     if not event_id or event_id in processed_events:
         return
     processed_events.add(event_id)
-    play_sound(SOUND_ALERT, is_nhk=False)
 
     rows = []
     rows.append(["发震时刻", safe_get(data, 'shockTime', 'OriginTime')])
@@ -978,7 +1160,16 @@ def process_cwa_eew(data, source_key, source_label):
     print_earthquake_table("地震预警速报 (台湾气象署 CWA-EEW)", rows, source_label)
     dist = haversine(lat, lon, USER_LATITUDE, USER_LONGITUDE) if lat and lon and USER_LATITUDE else None
     if dist is not None:
-        start_countdown(f"cwa_{event_id}", safe_get(data, 'shockTime', 'OriginTime'), dist, USER_LOCATION_NAME, safe_get(data, 'magnitude', 'Magunitude'), safe_get(data, 'placeName', 'Hypocenter'))
+        mag_val = safe_get(data, 'magnitude', 'Magunitude')
+        origin_name = safe_get(data, 'placeName', 'Hypocenter')
+        ot = safe_get(data, 'shockTime', 'OriginTime')
+        depth_val = safe_get(data, 'depth', 'Depth')
+        p_sec, s_sec = calc_wave_arrival(dist)
+        local_int = estimate_local_intensity(mag_val, dist)
+        trigger_alert(source_label, origin_name, mag_val, depth_val, dist,
+                      local_int, None, ot, p_sec, s_sec, event_id)
+        if local_int and local_int > 0:
+            start_countdown(f"cwa_{event_id}", ot, dist, USER_LOCATION_NAME, mag_val, origin_name)
 
 
 def process_cwa_report(data, source_key, source_label):
@@ -986,7 +1177,6 @@ def process_cwa_report(data, source_key, source_label):
     if not event_id or event_id in processed_events:
         return
     processed_events.add(event_id)
-    play_sound(SOUND_ALERT, is_nhk=False)
 
     rows = []
     rows.append(["发震时刻", safe_get(data, 'shockTime', 'OriginTime')])
@@ -1002,7 +1192,16 @@ def process_cwa_report(data, source_key, source_label):
     print_earthquake_table("地震报告 (台湾气象署 CWA)", rows, source_label)
     dist = haversine(lat, lon, USER_LATITUDE, USER_LONGITUDE) if lat and lon and USER_LATITUDE else None
     if dist is not None:
-        start_countdown(f"cwa_rpt_{event_id}", safe_get(data, 'shockTime', 'OriginTime'), dist, USER_LOCATION_NAME, safe_get(data, 'magnitude', 'Magunitude'), safe_get(data, 'placeName', 'Hypocenter'))
+        mag_val = safe_get(data, 'magnitude', 'Magunitude')
+        origin_name = safe_get(data, 'placeName', 'Hypocenter')
+        ot = safe_get(data, 'shockTime', 'OriginTime')
+        depth_val = safe_get(data, 'depth', 'Depth')
+        p_sec, s_sec = calc_wave_arrival(dist)
+        local_int = estimate_local_intensity(mag_val, dist)
+        trigger_alert(source_label, origin_name, mag_val, depth_val, dist,
+                      local_int, None, ot, p_sec, s_sec, event_id)
+        if local_int and local_int > 0:
+            start_countdown(f"cwa_rpt_{event_id}", ot, dist, USER_LOCATION_NAME, mag_val, origin_name)
 
 
 def process_provincial_eew(data, source_key, source_label, province_name):
@@ -1010,7 +1209,6 @@ def process_provincial_eew(data, source_key, source_label, province_name):
     if not event_id or event_id in processed_events:
         return
     processed_events.add(event_id)
-    play_sound(SOUND_ALERT, is_nhk=False)
 
     rows = []
     rows.append(["发震时刻", safe_get(data, 'shockTime', 'OriginTime')])
@@ -1026,7 +1224,16 @@ def process_provincial_eew(data, source_key, source_label, province_name):
     print_earthquake_table(f"地震测定报 ({province_name}省地震局)", rows, source_label)
     dist = haversine(lat, lon, USER_LATITUDE, USER_LONGITUDE) if lat and lon and USER_LATITUDE else None
     if dist is not None:
-        start_countdown(f"prov_{event_id}", safe_get(data, 'shockTime', 'OriginTime'), dist, USER_LOCATION_NAME, safe_get(data, 'magnitude', 'Magunitude'), safe_get(data, 'placeName', 'Hypocenter'))
+        mag_val = safe_get(data, 'magnitude', 'Magunitude')
+        origin_name = safe_get(data, 'placeName', 'Hypocenter')
+        ot = safe_get(data, 'shockTime', 'OriginTime')
+        depth_val = safe_get(data, 'depth', 'Depth')
+        p_sec, s_sec = calc_wave_arrival(dist)
+        local_int = estimate_local_intensity(mag_val, dist)
+        trigger_alert(source_label, origin_name, mag_val, depth_val, dist,
+                      local_int, None, ot, p_sec, s_sec, event_id)
+        if local_int and local_int > 0:
+            start_countdown(f"prov_{event_id}", ot, dist, USER_LOCATION_NAME, mag_val, origin_name)
 
 
 def process_hko_eew(data, source_key, source_label):
@@ -1034,7 +1241,6 @@ def process_hko_eew(data, source_key, source_label):
     if not event_id or event_id in processed_events:
         return
     processed_events.add(event_id)
-    play_sound(SOUND_ALERT, is_nhk=False)
 
     rows = []
     rows.append(["发震时刻", safe_get(data, 'shockTime', 'OriginTime')])
@@ -1051,7 +1257,16 @@ def process_hko_eew(data, source_key, source_label):
     print_earthquake_table("地震报告 (香港天文台 HKO)", rows, source_label)
     dist = haversine(lat, lon, USER_LATITUDE, USER_LONGITUDE) if lat and lon and USER_LATITUDE else None
     if dist is not None:
-        start_countdown(f"hko_{event_id}", safe_get(data, 'shockTime', 'OriginTime'), dist, USER_LOCATION_NAME, safe_get(data, 'magnitude', 'Magunitude'), safe_get(data, 'placeName', 'Hypocenter'))
+        mag_val = safe_get(data, 'magnitude', 'Magunitude')
+        origin_name = safe_get(data, 'placeName', 'Hypocenter')
+        ot = safe_get(data, 'shockTime', 'OriginTime')
+        depth_val = safe_get(data, 'depth', 'Depth')
+        p_sec, s_sec = calc_wave_arrival(dist)
+        local_int = estimate_local_intensity(mag_val, dist)
+        trigger_alert(source_label, origin_name, mag_val, depth_val, dist,
+                      local_int, None, ot, p_sec, s_sec, event_id)
+        if local_int and local_int > 0:
+            start_countdown(f"hko_{event_id}", ot, dist, USER_LOCATION_NAME, mag_val, origin_name)
 
 
 def process_usgs_eew(data, source_key, source_label):
@@ -1059,7 +1274,6 @@ def process_usgs_eew(data, source_key, source_label):
     if not event_id or event_id in processed_events:
         return
     processed_events.add(event_id)
-    play_sound(SOUND_ALERT, is_nhk=False)
 
     rows = []
     rows.append(["发震时刻", safe_get(data, 'shockTime', 'OriginTime')])
@@ -1076,7 +1290,16 @@ def process_usgs_eew(data, source_key, source_label):
     print_earthquake_table("地震测定报 (USGS)", rows, source_label)
     dist = haversine(lat, lon, USER_LATITUDE, USER_LONGITUDE) if lat and lon and USER_LATITUDE else None
     if dist is not None:
-        start_countdown(f"usgs_{event_id}", safe_get(data, 'shockTime', 'OriginTime'), dist, USER_LOCATION_NAME, safe_get(data, 'magnitude', 'Magunitude'), safe_get(data, 'placeName', 'Hypocenter'))
+        mag_val = safe_get(data, 'magnitude', 'Magunitude')
+        origin_name = safe_get(data, 'placeName', 'Hypocenter')
+        ot = safe_get(data, 'shockTime', 'OriginTime')
+        depth_val = safe_get(data, 'depth', 'Depth')
+        p_sec, s_sec = calc_wave_arrival(dist)
+        local_int = estimate_local_intensity(mag_val, dist)
+        trigger_alert(source_label, origin_name, mag_val, depth_val, dist,
+                      local_int, None, ot, p_sec, s_sec, event_id)
+        if local_int and local_int > 0:
+            start_countdown(f"usgs_{event_id}", ot, dist, USER_LOCATION_NAME, mag_val, origin_name)
 
 
 def process_generic_eew(data, source_key, source_label, data_type):
@@ -1084,7 +1307,6 @@ def process_generic_eew(data, source_key, source_label, data_type):
     if not event_id or event_id in processed_events:
         return
     processed_events.add(event_id)
-    play_sound(SOUND_ALERT, is_nhk=False)
 
     rows = []
     rows.append(["发震时刻", safe_get(data, 'shockTime', 'OriginTime', 'origin_time')])
@@ -1100,7 +1322,16 @@ def process_generic_eew(data, source_key, source_label, data_type):
     print_earthquake_table(f"地震报告 ({data_type})", rows, source_label)
     dist = haversine(lat, lon, USER_LATITUDE, USER_LONGITUDE) if lat and lon and USER_LATITUDE else None
     if dist is not None:
-        start_countdown(f"generic_{event_id}", safe_get(data, 'shockTime', 'OriginTime', 'origin_time'), dist, USER_LOCATION_NAME, safe_get(data, 'magnitude', 'Magunitude'), safe_get(data, 'placeName', 'Hypocenter', 'region_name'))
+        mag_val = safe_get(data, 'magnitude', 'Magunitude')
+        origin_name = safe_get(data, 'placeName', 'Hypocenter', 'region_name')
+        ot = safe_get(data, 'shockTime', 'OriginTime', 'origin_time')
+        depth_val = safe_get(data, 'depth', 'Depth')
+        p_sec, s_sec = calc_wave_arrival(dist)
+        local_int = estimate_local_intensity(mag_val, dist)
+        trigger_alert(source_label, origin_name, mag_val, depth_val, dist,
+                      local_int, None, ot, p_sec, s_sec, event_id)
+        if local_int and local_int > 0:
+            start_countdown(f"generic_{event_id}", ot, dist, USER_LOCATION_NAME, mag_val, origin_name)
 
 
 # ---------- 统一入口 ----------
@@ -1288,10 +1519,17 @@ def process_p2p_quake(data):
             title = f"P2P 地震情報 ({issue_type or 'Unknown'})"
 
         print_earthquake_table(title, rows, "P2P JSON API")
-        play_sound(SOUND_ALERT, is_nhk=False)
         dist = haversine(lat, lon, USER_LATITUDE, USER_LONGITUDE) if lat and lon and lat != -200 and lon != -200 and USER_LATITUDE else None
         if dist is not None:
-            start_countdown(f"p2p_{quake_id}", origin_time, dist, USER_LOCATION_NAME, hypocenter.get('magnitude', -1), hypocenter.get('name', '未知'))
+            mag_val = hypocenter.get('magnitude', -1)
+            origin_name = hypocenter.get('name', '未知')
+            depth_val = hypocenter.get('depth')
+            p_sec, s_sec = calc_wave_arrival(dist)
+            local_int = estimate_local_intensity(mag_val, dist)
+            trigger_alert("P2P", origin_name, mag_val, depth_val, dist,
+                          local_int, None, origin_time, p_sec, s_sec, quake_id)
+            if local_int and local_int > 0:
+                start_countdown(f"p2p_{quake_id}", origin_time, dist, USER_LOCATION_NAME, mag_val, origin_name)
 
     except Exception as e:
         console.print(f"[red]P2P 地震处理异常: {e}[/red]")
@@ -1322,7 +1560,7 @@ def process_p2p_tsunami(data):
                 rows.append(["直ちに来襲", "はい" if immediate else "いいえ"])
                 rows.append(["最大波高", height_desc])
         print_earthquake_table("P2P 津波予報", rows, "P2P JSON API")
-        play_sound(SOUND_ALERT, is_nhk=False)
+        play_sound(SOUND_ALERT)
     except Exception as e:
         console.print(f"[red]P2P 海啸解析错误: {e}[/red]")
 
@@ -1367,7 +1605,7 @@ def process_p2p_eew(data):
             rows.append(["予測地域", "なし"])
 
         print_earthquake_table("P2P 緊急地震速報", rows, "P2P JSON API")
-        play_sound(SOUND_NHK, is_nhk=True)
+        play_sound(SOUND_ALERT)
     except Exception as e:
         console.print(f"[red]P2P EEW 解析错误: {e}[/red]")
 
@@ -1380,7 +1618,7 @@ def process_p2p_userquake(data):
         rows.append(["地域コード", str(area_code)])
         rows.append(["受信時刻", data.get('time', 'N/A')])
         print_earthquake_table("P2P 地震感知情報", rows, "P2P JSON API")
-        play_sound(SOUND_ALERT, is_nhk=False)
+        play_sound(SOUND_ALERT)
     except Exception as e:
         console.print(f"[red]P2P 感知情報解析错误: {e}[/red]")
 
@@ -1400,7 +1638,7 @@ def process_weather_warning(data, source_key):
 
         if rows:
             print_weather_table("气象预警 (中国气象局)", rows, SOURCE_DISPLAY.get(source_key, source_key))
-            play_sound(SOUND_ALERT, is_nhk=False)
+            play_sound(SOUND_ALERT)
     except Exception as e:
         console.print(f"[red]气象预警解析错误: {e}[/red]")
 
@@ -2260,9 +2498,6 @@ def main():
     console.print("\n[bold yellow]========== Wolfx 地震预警命令行监控程序 v1.8.2 ==========[/bold yellow]")
     if not os.path.exists(SOUND_ALERT):
         console.print("[yellow]提示: 普通提示音文件未找到，将无法播放。[/yellow]")
-    if not os.path.exists(SOUND_NHK):
-        console.print("[yellow]提示: 紧急铃声文件未找到，将无法播放。[/yellow]")
-
     config = load_config()
     apply_config(config)
     if EXPORT_FILE_PATH:

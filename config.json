@@ -69,6 +69,10 @@
       "fssn-cmt": false
     }
   },
+  "alert": {
+    "bark_url": null,
+    "tiers": {}
+  },
   "export_path": null,
   "debug": true
 }
