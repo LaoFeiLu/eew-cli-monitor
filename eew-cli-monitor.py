@@ -1640,7 +1640,9 @@ def start_fan_websocket():
 
 # ---------- Wolfx WebSocket ----------
 def on_message_factory(source_key):
+    _heartbeat_shown = False
     def on_message(ws, message):
+        nonlocal _heartbeat_shown
         if not SOURCE_CONFIG.get(source_key, {}).get('enabled', True):
             return
         try:
@@ -1649,7 +1651,8 @@ def on_message_factory(source_key):
                 return
             msg_type = data.get('type', '')
             if msg_type == 'heartbeat':
-                if DEBUG:
+                if DEBUG and not _heartbeat_shown:
+                    _heartbeat_shown = True
                     ts = data.get('timestamp', 0)
                     if ts:
                         delay = abs(int(time.time() * 1000 - int(ts)))
