@@ -244,13 +244,18 @@ def _countdown_worker():
                 p_rem = info['p_seconds'] - elapsed
                 s_rem = info['s_seconds'] - elapsed
                 loc = info.get('user_loc', '')
+                oname = info.get('origin_name', '未知')
+                mag = info.get('magnitude', '?')
+                dkm = info.get('distance_km', 0)
+                inten = info.get('intensity', 0)
+                prefix = f"{oname}M{mag}级 {dkm:.0f}km 预估烈度{inten}度 "
                 if s_rem <= 0:
-                    parts.append(f"[S波已抵达 {loc}]")
+                    parts.append(f"[{prefix}S波已抵达]{loc}")
                     finished.append(eid)
                 elif p_rem <= 0:
-                    parts.append(f"[P波已抵达 | S波 {int(s_rem)}秒] {loc}")
+                    parts.append(f"[{oname}M{mag}级 P波已抵达 | S波 {int(s_rem)}秒]{loc}")
                 else:
-                    parts.append(f"[P波 {int(p_rem)}秒 | S波 {int(s_rem)}秒] {loc}")
+                    parts.append(f"[{prefix}P波 {int(p_rem)}秒 | S波 {int(s_rem)}秒]{loc}")
             for eid in finished:
                 del _countdown_active[eid]
             if parts:
@@ -258,7 +263,7 @@ def _countdown_worker():
                 sys.stdout.flush()
 
 
-def start_countdown(event_id, origin_time_str, distance_km, user_loc, magnitude):
+def start_countdown(event_id, origin_time_str, distance_km, user_loc, magnitude, origin_name=''):
     if USER_LATITUDE is None or USER_LONGITUDE is None:
         return
     if distance_km is None or distance_km <= 0:
@@ -280,7 +285,11 @@ def start_countdown(event_id, origin_time_str, distance_km, user_loc, magnitude)
             'p_seconds': p_sec,
             's_seconds': s_sec,
             'start_time': start_ts,
-            'user_loc': user_loc or USER_LOCATION_NAME or ''
+            'user_loc': user_loc or USER_LOCATION_NAME or '',
+            'origin_name': origin_name or '未知',
+            'magnitude': magnitude,
+            'distance_km': distance_km,
+            'intensity': intensity,
         }
     if _countdown_thread is None or not _countdown_thread.is_alive():
         _countdown_thread = threading.Thread(target=_countdown_worker, daemon=True)
@@ -779,7 +788,7 @@ def process_jma_eew(data, source_key, source_label):
     print_earthquake_table("地震预警速报 (日本气象厅 JMA)", rows, source_label)
     dist = haversine(lat, lon, USER_LATITUDE, USER_LONGITUDE) if lat and lon and USER_LATITUDE else None
     if dist is not None:
-        start_countdown(f"jma_{event_id}", origin_time, dist, USER_LOCATION_NAME, safe_get(data, 'Magunitude', 'magnitude'))
+        start_countdown(f"jma_{event_id}", origin_time, dist, USER_LOCATION_NAME, safe_get(data, 'Magunitude', 'magnitude'), safe_get(data, 'Hypocenter', 'placeName', 'region_name'))
 
 
 def process_cenc_eew(data, source_key, source_label):
@@ -811,7 +820,7 @@ def process_cenc_eew(data, source_key, source_label):
     print_earthquake_table("地震情报 (中国地震台网中心 CENC)", rows, source_label)
     dist = haversine(lat, lon, USER_LATITUDE, USER_LONGITUDE) if lat and lon and USER_LATITUDE else None
     if dist is not None:
-        start_countdown(f"cenc_{event_id}", safe_get(data, 'OriginTime', 'origin_time', 'shockTime'), dist, USER_LOCATION_NAME, safe_get(data, 'Magnitude', 'Magunitude', 'magnitude'))
+        start_countdown(f"cenc_{event_id}", safe_get(data, 'OriginTime', 'origin_time', 'shockTime'), dist, USER_LOCATION_NAME, safe_get(data, 'Magnitude', 'Magunitude', 'magnitude'), safe_get(data, 'HypoCenter', 'Hypocenter', 'hypocenter', 'placeName'))
 
 
 def process_sc_eew(data, source_key, source_label):
@@ -839,7 +848,7 @@ def process_sc_eew(data, source_key, source_label):
     print_earthquake_table("地震测定报 (四川省地震局 SC)", rows, source_label)
     dist = haversine(lat, lon, USER_LATITUDE, USER_LONGITUDE) if lat and lon and USER_LATITUDE else None
     if dist is not None:
-        start_countdown(f"sc_{event_id}", safe_get(data, 'OriginTime', 'origin_time'), dist, USER_LOCATION_NAME, safe_get(data, 'Magunitude', 'magnitude'))
+        start_countdown(f"sc_{event_id}", safe_get(data, 'OriginTime', 'origin_time'), dist, USER_LOCATION_NAME, safe_get(data, 'Magunitude', 'magnitude'), safe_get(data, 'HypoCenter', 'Hypocenter', 'placeName'))
 
 
 def process_fj_eew(data, source_key, source_label):
@@ -865,7 +874,7 @@ def process_fj_eew(data, source_key, source_label):
     print_earthquake_table("地震测定报 (福建省地震局 FJ)", rows, source_label)
     dist = haversine(lat, lon, USER_LATITUDE, USER_LONGITUDE) if lat and lon and USER_LATITUDE else None
     if dist is not None:
-        start_countdown(f"fj_{event_id}", safe_get(data, 'OriginTime', 'origin_time'), dist, USER_LOCATION_NAME, safe_get(data, 'Magunitude', 'magnitude'))
+        start_countdown(f"fj_{event_id}", safe_get(data, 'OriginTime', 'origin_time'), dist, USER_LOCATION_NAME, safe_get(data, 'Magunitude', 'magnitude'), safe_get(data, 'HypoCenter', 'Hypocenter', 'placeName'))
 
 
 def process_cq_eew(data, source_key, source_label):
@@ -892,7 +901,7 @@ def process_cq_eew(data, source_key, source_label):
     print_earthquake_table("地震测定报 (重庆市地震局 CQ)", rows, source_label)
     dist = haversine(lat, lon, USER_LATITUDE, USER_LONGITUDE) if lat and lon and USER_LATITUDE else None
     if dist is not None:
-        start_countdown(f"cq_{event_id}", safe_get(data, 'OriginTime', 'origin_time'), dist, USER_LOCATION_NAME, safe_get(data, 'Magnitude', 'Magunitude', 'magnitude'))
+        start_countdown(f"cq_{event_id}", safe_get(data, 'OriginTime', 'origin_time'), dist, USER_LOCATION_NAME, safe_get(data, 'Magnitude', 'Magunitude', 'magnitude'), safe_get(data, 'HypoCenter', 'Hypocenter', 'placeName'))
 
 
 def process_cenc_eqlist(data, source_key, source_label):
@@ -969,7 +978,7 @@ def process_cwa_eew(data, source_key, source_label):
     print_earthquake_table("地震预警速报 (台湾气象署 CWA-EEW)", rows, source_label)
     dist = haversine(lat, lon, USER_LATITUDE, USER_LONGITUDE) if lat and lon and USER_LATITUDE else None
     if dist is not None:
-        start_countdown(f"cwa_{event_id}", safe_get(data, 'shockTime', 'OriginTime'), dist, USER_LOCATION_NAME, safe_get(data, 'magnitude', 'Magunitude'))
+        start_countdown(f"cwa_{event_id}", safe_get(data, 'shockTime', 'OriginTime'), dist, USER_LOCATION_NAME, safe_get(data, 'magnitude', 'Magunitude'), safe_get(data, 'placeName', 'Hypocenter'))
 
 
 def process_cwa_report(data, source_key, source_label):
@@ -993,7 +1002,7 @@ def process_cwa_report(data, source_key, source_label):
     print_earthquake_table("地震报告 (台湾气象署 CWA)", rows, source_label)
     dist = haversine(lat, lon, USER_LATITUDE, USER_LONGITUDE) if lat and lon and USER_LATITUDE else None
     if dist is not None:
-        start_countdown(f"cwa_rpt_{event_id}", safe_get(data, 'shockTime', 'OriginTime'), dist, USER_LOCATION_NAME, safe_get(data, 'magnitude', 'Magunitude'))
+        start_countdown(f"cwa_rpt_{event_id}", safe_get(data, 'shockTime', 'OriginTime'), dist, USER_LOCATION_NAME, safe_get(data, 'magnitude', 'Magunitude'), safe_get(data, 'placeName', 'Hypocenter'))
 
 
 def process_provincial_eew(data, source_key, source_label, province_name):
@@ -1017,7 +1026,7 @@ def process_provincial_eew(data, source_key, source_label, province_name):
     print_earthquake_table(f"地震测定报 ({province_name}省地震局)", rows, source_label)
     dist = haversine(lat, lon, USER_LATITUDE, USER_LONGITUDE) if lat and lon and USER_LATITUDE else None
     if dist is not None:
-        start_countdown(f"prov_{event_id}", safe_get(data, 'shockTime', 'OriginTime'), dist, USER_LOCATION_NAME, safe_get(data, 'magnitude', 'Magunitude'))
+        start_countdown(f"prov_{event_id}", safe_get(data, 'shockTime', 'OriginTime'), dist, USER_LOCATION_NAME, safe_get(data, 'magnitude', 'Magunitude'), safe_get(data, 'placeName', 'Hypocenter'))
 
 
 def process_hko_eew(data, source_key, source_label):
@@ -1042,7 +1051,7 @@ def process_hko_eew(data, source_key, source_label):
     print_earthquake_table("地震报告 (香港天文台 HKO)", rows, source_label)
     dist = haversine(lat, lon, USER_LATITUDE, USER_LONGITUDE) if lat and lon and USER_LATITUDE else None
     if dist is not None:
-        start_countdown(f"hko_{event_id}", safe_get(data, 'shockTime', 'OriginTime'), dist, USER_LOCATION_NAME, safe_get(data, 'magnitude', 'Magunitude'))
+        start_countdown(f"hko_{event_id}", safe_get(data, 'shockTime', 'OriginTime'), dist, USER_LOCATION_NAME, safe_get(data, 'magnitude', 'Magunitude'), safe_get(data, 'placeName', 'Hypocenter'))
 
 
 def process_usgs_eew(data, source_key, source_label):
@@ -1067,7 +1076,7 @@ def process_usgs_eew(data, source_key, source_label):
     print_earthquake_table("地震测定报 (USGS)", rows, source_label)
     dist = haversine(lat, lon, USER_LATITUDE, USER_LONGITUDE) if lat and lon and USER_LATITUDE else None
     if dist is not None:
-        start_countdown(f"usgs_{event_id}", safe_get(data, 'shockTime', 'OriginTime'), dist, USER_LOCATION_NAME, safe_get(data, 'magnitude', 'Magunitude'))
+        start_countdown(f"usgs_{event_id}", safe_get(data, 'shockTime', 'OriginTime'), dist, USER_LOCATION_NAME, safe_get(data, 'magnitude', 'Magunitude'), safe_get(data, 'placeName', 'Hypocenter'))
 
 
 def process_generic_eew(data, source_key, source_label, data_type):
@@ -1091,7 +1100,7 @@ def process_generic_eew(data, source_key, source_label, data_type):
     print_earthquake_table(f"地震报告 ({data_type})", rows, source_label)
     dist = haversine(lat, lon, USER_LATITUDE, USER_LONGITUDE) if lat and lon and USER_LATITUDE else None
     if dist is not None:
-        start_countdown(f"generic_{event_id}", safe_get(data, 'shockTime', 'OriginTime', 'origin_time'), dist, USER_LOCATION_NAME, safe_get(data, 'magnitude', 'Magunitude'))
+        start_countdown(f"generic_{event_id}", safe_get(data, 'shockTime', 'OriginTime', 'origin_time'), dist, USER_LOCATION_NAME, safe_get(data, 'magnitude', 'Magunitude'), safe_get(data, 'placeName', 'Hypocenter', 'region_name'))
 
 
 # ---------- 统一入口 ----------
@@ -1282,7 +1291,7 @@ def process_p2p_quake(data):
         play_sound(SOUND_ALERT, is_nhk=False)
         dist = haversine(lat, lon, USER_LATITUDE, USER_LONGITUDE) if lat and lon and lat != -200 and lon != -200 and USER_LATITUDE else None
         if dist is not None:
-            start_countdown(f"p2p_{quake_id}", origin_time, dist, USER_LOCATION_NAME, hypocenter.get('magnitude', -1))
+            start_countdown(f"p2p_{quake_id}", origin_time, dist, USER_LOCATION_NAME, hypocenter.get('magnitude', -1), hypocenter.get('name', '未知'))
 
     except Exception as e:
         console.print(f"[red]P2P 地震处理异常: {e}[/red]")
