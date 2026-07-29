@@ -40,7 +40,6 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path release_assets -Force
           Copy-Item "dist/${{ env.commit_short }}-eew-cli-monitor.exe" -Destination release_assets/
-          Copy-Item config.json -Destination release_assets/
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
