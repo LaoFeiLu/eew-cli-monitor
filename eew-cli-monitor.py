@@ -203,7 +203,7 @@ def add_location_rows(rows, lat, lon, mag):
     if s_sec is not None:
         rows.append(["S波到达", f"{s_sec}秒"])
 
-    show_epicenter_map(lat, lon)
+    show_epicenter_map(lat, lon, mag)
     return True
 
 
@@ -211,32 +211,100 @@ def _in_china(lon, lat):
     xmin, ymin, xmax, ymax = geo_ascii.CHINA_BBOX
     return xmin <= lon <= xmax and ymin <= lat <= ymax
 
-def _colorize_world(ascii_str):
+def _colorize_world(ascii_str, mag=None, epi_lat=None, epi_lon=None):
     t = Text()
-    for line in ascii_str.splitlines():
-        for ch in line:
+    bbox = geo_ascii.WORLD_BBOX
+    pixel_w = geo_ascii.WORLD_WIDTH
+    pixel_h = geo_ascii.WORLD_HEIGHT
+    x_min, y_min, x_max, y_max = bbox
+    cell_size = (x_max - x_min) / pixel_w
+    for row, line in enumerate(ascii_str.splitlines()):
+        for tc, ch in enumerate(line):
+            if ch == '#':
+                if mag and epi_lat is not None and epi_lon is not None:
+                    pixel_col = tc // 2
+                    char_lon = x_min + (pixel_col + 0.5) * cell_size
+                    char_lat = y_max - (row + 0.5) * cell_size
+                    dist = haversine(epi_lat, epi_lon, char_lat, char_lon)
+                    if dist is not None:
+                        intensity = estimate_local_intensity(mag, dist)
+                        if intensity is not None and intensity > 0:
+                            style = _intensity_style(intensity)
+                            if style:
+                                t.append(str(int(round(intensity))), style=style)
+                                continue
+                t.append('#', style='grey54')
+            elif ch == '*':
+                t.append('*', style='bold white on red')
+            elif ch == '@':
+                t.append('@', style='bold white on green')
+            else:
+                t.append(ch, style='dim' if ch.strip() else '')
+        t.append('\n')
+    return t
+
+def _colorize_china_with_intensity(epi_lon, epi_lat, mon_lon, mon_lat, mag=None):
+    rows = [list(r) for r in geo_ascii.CHINA_COLORED.splitlines()]
+    ph = len(rows)
+    for lon, lat, ch in [(epi_lon, epi_lat, '*'), (mon_lon, mon_lat, '@')]:
+        r, c = geo_ascii.lonlat_to_rc(lon, lat, geo_ascii.CHINA_BBOX, geo_ascii.MAP_WIDTH, ph)
+        tc = c * 2
+        if 0 <= r < ph and 0 <= tc < len(rows[r]):
+            rows[r][tc] = ch
+    bbox = geo_ascii.CHINA_BBOX
+    pixel_w = geo_ascii.MAP_WIDTH
+    pixel_h = ph
+    x_min, y_min, x_max, y_max = bbox
+    cell_size = (x_max - x_min) / pixel_w
+    t = Text()
+    for row, line in enumerate(rows):
+        for tc, ch in enumerate(line):
             if ch == '*':
                 t.append('*', style='bold white on red')
             elif ch == '@':
                 t.append('@', style='bold white on green')
-            elif ch == '#':
-                t.append(ch, style='grey54')
+            elif ch == ' ':
+                t.append(' ', style='')
+            elif mag and epi_lat is not None and epi_lon is not None:
+                pixel_col = tc // 2
+                char_lon = x_min + (pixel_col + 0.5) * cell_size
+                char_lat = y_max - (row + 0.5) * cell_size
+                dist = haversine(epi_lat, epi_lon, char_lat, char_lon)
+                if dist is not None:
+                    intensity = estimate_local_intensity(mag, dist)
+                    if intensity is not None and intensity > 0:
+                        style = _intensity_style(intensity)
+                        if style:
+                            t.append(str(int(round(intensity))), style=style)
+                            continue
+                if ch in geo_ascii.CHINA_COLORMAP:
+                    t.append(ch, style=geo_ascii.CHINA_COLORMAP[ch])
+                else:
+                    t.append(ch, style='dim')
             else:
-                t.append(ch, style='dim')
+                if ch in geo_ascii.CHINA_COLORMAP:
+                    t.append(ch, style=geo_ascii.CHINA_COLORMAP[ch])
+                else:
+                    t.append(ch, style='dim')
         t.append('\n')
     return t
 
-def show_epicenter_map(lat, lon):
+
+def show_epicenter_map(lat, lon, mag=None):
     if not lat or not lon:
         return
     try:
         lon_f = float(lon)
         lat_f = float(lat)
+        try:
+            mag_f = float(mag) if mag and str(mag).strip() not in ('N/A', '', 'None') else None
+        except (ValueError, TypeError):
+            mag_f = None
         mon_lon = USER_LONGITUDE if USER_LATITUDE is not None else None
         mon_lat = USER_LATITUDE if USER_LONGITUDE is not None else None
 
-        # World map — always shown, markers highlighted
-        console.print("[bold cyan]世界地图 (*震中 @监控点)[/bold cyan]")
+        # World map — markers + intensity-colored land
+        console.print("[bold cyan] (*震中 @监控点)[/bold cyan]")
         points = [(lon_f, lat_f, '*')]
         if mon_lon is not None and mon_lat is not None:
             points.append((mon_lon, mon_lat, '@'))
@@ -244,12 +312,12 @@ def show_epicenter_map(lat, lon):
             geo_ascii.WORLD_MAP, geo_ascii.WORLD_BBOX,
             geo_ascii.WORLD_WIDTH, geo_ascii.WORLD_HEIGHT, points
         )
-        console.print(_colorize_world(world_mapped))
+        console.print(_colorize_world(world_mapped, mag_f, lat_f, lon_f))
 
-        # China map — colored per-province, only if epicenter in China
+        # China map — intensity-colored provinces, only if epicenter in China
         if _in_china(lon_f, lat_f) and mon_lon is not None and mon_lat is not None:
-            china_t = geo_ascii.colorize_china(lon_f, lat_f, mon_lon, mon_lat)
-            console.print("[bold cyan]中国地图 (*震中 @监控点)[/bold cyan]")
+            china_t = _colorize_china_with_intensity(lon_f, lat_f, mon_lon, mon_lat, mag_f)
+            console.print("[bold cyan] (*震中 @监控点)[/bold cyan]")
             console.print(china_t)
     except Exception:
         pass
@@ -937,16 +1005,20 @@ def _intensity_style(val):
             else:
                 return None
     if v <= 0.5:
-        return "white on grey19"
+        return None                           # 灰色 (默认)
     if v <= 1.5:
-        return "white on green"
+        return "black on light_cyan"          # 1度 - 浅蓝
     if v <= 2.5:
-        return "white on yellow"
+        return "white on green"               # 2度 - 绿
     if v <= 3.5:
-        return "white on dark_orange"
+        return "black on yellow"              # 3度 - 黄
     if v <= 4.5:
-        return "white on red"
-    return "bold white on red"
+        return "white on dark_orange"         # 4度 - 橙
+    if v <= 5.5:
+        return "bold white on red"            # 5度 - 红
+    if v <= 6.5:
+        return "bold white on magenta"        # 6度 - 紫红
+    return "bold white on bright_magenta"     # 7+  - 深紫
 
 
 def print_earthquake_table(title, rows, source_label):
@@ -2661,10 +2733,8 @@ def handle_command(cmd):
 
     elif parts[0] == 'map':
         if len(parts) > 1 and parts[1] == 'world':
-            console.print("[bold cyan]世界地图[/bold cyan]")
             console.print(geo_ascii.WORLD_MAP)
         else:
-            console.print("[bold cyan]中国地图[/bold cyan]")
             console.print(geo_ascii.CHINA_MAP)
         return
 
