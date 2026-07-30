@@ -105,18 +105,13 @@ pyinstaller --onefile --add-data "sounds;sounds" --add-data "geo;geo" --add-data
 
 ## 致谢
 
-- 地震预警数据由 [Wolfx Project](https://wolfx.jp/)、[P2PQuake](https://www.p2pquake.net/)、[NIED](https://www.bosai.go.jp/sp/)、[FAN](https://api.fanstudio.tech/) 提供
-- [DeepSeek](https://deepseek.com/) 协助代码编写
+- 本程序使用的所有地震预警数据均由 [Wolfx Project](https://wolfx.jp/) , [P2PQuake](https://www.p2pquake.net/) , [NIED](https://www.bosai.go.jp/sp/) , [FAN](https://api.fanstudio.tech/) 提供，感谢他们的无私贡献。
+- 感谢 [DeepSeek](https://deepseek.com/) 人工智能助手协助编写、优化和调试本程序代码。
 - 感谢[troilus](https://github.com/troilus)对项目的无私贡献
 
 ### 说明
 
 - 本人为高中生，能力有限，项目如有错误请谅解，可以向3822104508@qq.com提交错误,本人会尽力解决
-   
-### 致谢
-
-- 本程序使用的所有地震预警数据均由 [Wolfx Project](https://wolfx.jp/) , [P2PQuake](https://www.p2pquake.net/) , [NIED](https://www.bosai.go.jp/sp/) , [FAN](https://api.fanstudio.tech/) 提供，感谢他们的无私贡献。
-- 感谢 [DeepSeek](https://deepseek.com/) 人工智能助手协助编写、优化和调试本程序代码。
    
 ### 许可证
 - 本项目采用 MIT 许可证。
