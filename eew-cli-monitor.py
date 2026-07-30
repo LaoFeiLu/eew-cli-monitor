@@ -18,6 +18,8 @@ from rich import box
 from rich.text import Text
 from rich.prompt import Prompt
 
+from geo import geo_ascii
+
 try:
     import msvcrt
     WINDOWS = True
@@ -200,7 +202,54 @@ def add_location_rows(rows, lat, lon, mag):
         rows.append(["P波到达", f"{p_sec}秒"])
     if s_sec is not None:
         rows.append(["S波到达", f"{s_sec}秒"])
+
+    show_epicenter_map(lat, lon)
     return True
+
+
+def _in_china(lon, lat):
+    xmin, ymin, xmax, ymax = geo_ascii.CHINA_BBOX
+    return xmin <= lon <= xmax and ymin <= lat <= ymax
+
+def _color_map(ascii_str):
+    t = Text()
+    for line in ascii_str.splitlines():
+        for ch in line:
+            if ch == '*':
+                t.append('*', style='bold red')
+            elif ch == '@':
+                t.append('@', style='bold green')
+            else:
+                t.append(ch, style='white')
+        t.append('\n')
+    return t
+
+def show_epicenter_map(lat, lon):
+    if not lat or not lon:
+        return
+    try:
+        lon_f = float(lon)
+        lat_f = float(lat)
+        points = [(lon_f, lat_f, '*')]
+        if USER_LATITUDE is not None and USER_LONGITUDE is not None:
+            points.append((USER_LONGITUDE, USER_LATITUDE, '@'))
+
+        console.print("[bold cyan]世界地图 (*震中 @监控点)[/bold cyan]")
+        world_mapped = geo_ascii.plot_on_map(
+            geo_ascii.WORLD_MAP, geo_ascii.WORLD_BBOX,
+            geo_ascii.WORLD_WIDTH, geo_ascii.WORLD_HEIGHT, points
+        )
+        console.print(_color_map(world_mapped))
+
+        if _in_china(lon_f, lat_f):
+            console.print("[bold cyan]中国地图 (*震中 @监控点)[/bold cyan]")
+            china_mapped = geo_ascii.plot_on_map(
+                geo_ascii.CHINA_MAP, geo_ascii.CHINA_BBOX,
+                geo_ascii.CHINA_WIDTH, geo_ascii.CHINA_HEIGHT, points
+            )
+            console.print(_color_map(china_mapped))
+    except Exception:
+        pass
 
 
 # ================== P/S波动态倒计时 ==================
@@ -2427,6 +2476,7 @@ def handle_command(cmd):
         console.print("  test1                         - 模拟M3地震（汶川）")
         console.print("  test2                         - 模拟M6地震（汶川）")
         console.print("  test3                         - 模拟M8地震（汶川）")
+        console.print("  test5                         - 模拟M5.1地震（印尼巴布亚）")
         console.print("  debug [on|off]                - 开启/关闭调试模式")
         console.print("  export on/off                 - 开启/关闭表格导出到CSV")
         console.print("  export path <文件路径>        - 设置导出文件路径（相对路径）")
@@ -2439,6 +2489,7 @@ def handle_command(cmd):
         console.print("  restart <source>              - 重启数据源 (或 restart all)")
         console.print("  setup                         - 运行交互式配置向导")
         console.print("  status                        - 查看所有数据源状态")
+        console.print("  map [world]                   - 显示ASCII地图 (默认中国, map world 显示世界)")
         console.print("  list                          - 获取并显示中国地震台网地震目录 (cenc_eqlist)")
         console.print("  help                          - 显示此帮助")
         console.print("[dim]快捷键: Ctrl+C 退出[/dim]")
@@ -2455,6 +2506,9 @@ def handle_command(cmd):
         return
     elif parts[0] == 'test3':
         run_mock_test(8.0, 3)
+        return
+    elif parts[0] == 'test5':
+        run_mock_test5()
         return
 
     elif parts[0] == 'debug':
@@ -2602,6 +2656,15 @@ def handle_command(cmd):
             _enable_source(src)
         return
 
+    elif parts[0] == 'map':
+        if len(parts) > 1 and parts[1] == 'world':
+            console.print("[bold cyan]世界地图[/bold cyan]")
+            console.print(geo_ascii.WORLD_MAP)
+        else:
+            console.print("[bold cyan]中国地图[/bold cyan]")
+            console.print(geo_ascii.CHINA_MAP)
+        return
+
     elif parts[0] == 'list':
         try:
             url = HTTP_URLS.get('cenc_eqlist')
@@ -2659,6 +2722,24 @@ def run_mock_test(magnitude, report_num):
     process_eew(data, 'test')
 
 
+def run_mock_test5():
+    data = {
+        "type": "cenc",
+        "EventID": f"DEMO5_{datetime.now().strftime('%Y%m%d%H%M%S')}",
+        "ReportNum": 1,
+        "ReportTime": "2026-07-30 13:08:23",
+        "OriginTime": "2026-07-30 12:42:12",
+        "HypoCenter": "印尼巴布亚省",
+        "Latitude": -2.95,
+        "Longitude": 138.65,
+        "Magnitude": 5.1,
+        "Depth": 20,
+        "MaxIntensity": "7",
+        "isFinal": True,
+    }
+    process_eew(data, 'wolfx')
+
+
 def check_user_command():
     if not WINDOWS:
         return None
@@ -2697,6 +2778,8 @@ def main():
         console.print("[red]错误: websocket-client 未安装，WebSocket 数据源将不可用[/red]")
 
     console.print("\n[bold yellow]========== EEW-CLI-Monitor ==========[/bold yellow]")
+    console.print("[bold cyan]中国地图 (输入 map world 查看世界地图)[/bold cyan]")
+    console.print(geo_ascii.CHINA_MAP)
     if not os.path.exists(SOUND_ALERT):
         console.print("[yellow]提示: 普通提示音文件未找到，将无法播放。[/yellow]")
     config, config_found = load_config()
