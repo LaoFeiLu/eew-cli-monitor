@@ -3,6 +3,7 @@ import time
 import sys
 import os
 import winsound
+import ctypes
 import random
 import json
 import threading
@@ -51,11 +52,147 @@ SOUND_EEW1 = resource_path("sounds/EEW1.wav")
 SOUND_EEW2 = resource_path("sounds/EEW2.wav")
 
 
-def play_sound(file_path):
+from ctypes import (
+    Structure, POINTER, byref, cast, c_float, c_void_p, c_long,
+    windll, CFUNCTYPE
+)
+from ctypes.wintypes import DWORD, WORD, BYTE, LPVOID, BOOL
+
+
+class GUID(Structure):
+    _fields_ = [('Data1', DWORD), ('Data2', WORD), ('Data3', WORD),
+                ('Data4', BYTE * 8)]
+
+
+CLSID_MMDeviceEnumerator = GUID(
+    0xBCDE0395, 0xE52F, 0x467C,
+    (BYTE * 8)(0x8E, 0x3D, 0xC4, 0x57, 0x92, 0x91, 0x69, 0x2E))
+IID_IMMDeviceEnumerator = GUID(
+    0xA95664D2, 0x9614, 0x4F35,
+    (BYTE * 8)(0xA7, 0x46, 0xDE, 0x8D, 0xB6, 0x36, 0x17, 0xE6))
+IID_IAudioEndpointVolume = GUID(
+    0x5CDF2C82, 0x841E, 0x4546,
+    (BYTE * 8)(0x97, 0x22, 0x0C, 0xF7, 0x40, 0x78, 0x22, 0x9A))
+
+
+QueryInterfaceFunc = CFUNCTYPE(c_long, LPVOID, POINTER(GUID), POINTER(LPVOID))
+ReleaseFunc = CFUNCTYPE(c_void_p, LPVOID)
+GetDefaultAudioEndpointFunc = CFUNCTYPE(c_long, LPVOID, DWORD, DWORD, POINTER(LPVOID))
+ActivateFunc = CFUNCTYPE(c_long, LPVOID, POINTER(GUID), DWORD, POINTER(LPVOID), POINTER(LPVOID))
+GetScalarFunc = CFUNCTYPE(c_long, LPVOID, POINTER(c_float))
+SetScalarFunc = CFUNCTYPE(c_long, LPVOID, c_float, POINTER(GUID))
+GetMuteFunc = CFUNCTYPE(c_long, LPVOID, POINTER(BOOL))
+SetMuteFunc = CFUNCTYPE(c_long, LPVOID, BOOL, POINTER(GUID))
+
+_SavedVolume = None
+_SavedMuteState = None
+_EndpointVolume = None
+
+
+def _init_audio():
+    global _EndpointVolume
+    if _EndpointVolume is not None:
+        return True
+    try:
+        hr = windll.ole32.CoInitializeEx(None, 0)
+        if hr not in (0, 1):
+            return False
+
+        enum_ptr = LPVOID()
+        hr = windll.ole32.CoCreateInstance(
+            byref(CLSID_MMDeviceEnumerator), None, 1,
+            byref(IID_IMMDeviceEnumerator), byref(enum_ptr))
+        if hr != 0:
+            return False
+
+        enum_vtbl = cast(enum_ptr, POINTER(POINTER(c_void_p)))[0]
+        get_default = GetDefaultAudioEndpointFunc(enum_vtbl[4])
+        device_ptr = LPVOID()
+        hr = get_default(enum_ptr, 0, 1, byref(device_ptr))
+        if hr != 0:
+            ReleaseFunc(enum_vtbl[2])(enum_ptr)
+            return False
+
+        dev_vtbl = cast(device_ptr, POINTER(POINTER(c_void_p)))[0]
+        activate = ActivateFunc(dev_vtbl[3])
+        epv_ptr = LPVOID()
+        hr = activate(device_ptr, byref(IID_IAudioEndpointVolume), 0, None, byref(epv_ptr))
+        if hr != 0:
+            ReleaseFunc(dev_vtbl[2])(device_ptr)
+            ReleaseFunc(enum_vtbl[2])(enum_ptr)
+            return False
+
+        ReleaseFunc(dev_vtbl[2])(device_ptr)
+        ReleaseFunc(enum_vtbl[2])(enum_ptr)
+        _EndpointVolume = epv_ptr
+        return True
+    except Exception:
+        return False
+
+
+def _save_volume():
+    global _SavedVolume, _SavedMuteState
+    if not _init_audio():
+        _SavedVolume = _SavedMuteState = None
+        return
+    try:
+        vtbl = cast(_EndpointVolume, POINTER(POINTER(c_void_p)))[0]
+        get_scalar = GetScalarFunc(vtbl[9])
+        vol = c_float()
+        hr = get_scalar(_EndpointVolume, byref(vol))
+        _SavedVolume = vol.value if hr == 0 else None
+        get_mute = GetMuteFunc(vtbl[16])
+        muted = BOOL()
+        hr = get_mute(_EndpointVolume, byref(muted))
+        _SavedMuteState = bool(muted.value) if hr == 0 else None
+    except Exception:
+        _SavedVolume = _SavedMuteState = None
+
+
+def _set_max_volume():
+    if not _init_audio():
+        return
+    try:
+        vtbl = cast(_EndpointVolume, POINTER(POINTER(c_void_p)))[0]
+        SetScalarFunc(vtbl[7])(_EndpointVolume, 1.0, None)
+
+        # 检查是否静音，如果静音则尝试取消
+        muted = BOOL()
+        GetMuteFunc(vtbl[16])(_EndpointVolume, byref(muted))
+        if muted.value:
+            # Method 1: IAudioEndpointVolume::SetMute
+            SetMuteFunc(vtbl[15])(_EndpointVolume, 0, None)
+
+            # 验证是否取消成功
+            muted2 = BOOL()
+            GetMuteFunc(vtbl[16])(_EndpointVolume, byref(muted2))
+            if muted2.value and DEBUG:
+                console.print("[dim][DEBUG] 无法取消系统静音（当前音频设备不支持）[/dim]")
+    except Exception:
+        pass
+
+
+def _restore_volume():
+    global _SavedMuteState
+    if _SavedVolume is None or not _init_audio():
+        return
+    try:
+        vtbl = cast(_EndpointVolume, POINTER(POINTER(c_void_p)))[0]
+        set_scalar = SetScalarFunc(vtbl[7])
+        set_scalar(_EndpointVolume, _SavedVolume, None)
+        if _SavedMuteState is not None:
+            set_mute = SetMuteFunc(vtbl[15])
+            set_mute(_EndpointVolume, BOOL(_SavedMuteState), None)
+    except Exception:
+        pass
+
+
+def play_sound(file_path, sync=False):
     if not os.path.exists(file_path):
         return
     try:
-        winsound.PlaySound(file_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+        flags = winsound.SND_FILENAME | (0 if sync else winsound.SND_ASYNC)
+        winsound.PlaySound(file_path, flags)
         if DEBUG:
             console.print(f"[dim][DEBUG] 播放音效: {os.path.basename(file_path)}[/dim]")
     except Exception:
@@ -193,9 +330,9 @@ def add_location_rows(rows, lat, lon, mag):
     intensity = estimate_local_intensity(mag, dist)
     if intensity is not None:
         if intensity > 0:
-            rows.append(["本地烈度", f"{intensity}度"])
+            rows.append(["本地烈度(估值)", f"{intensity}度"])
         else:
-            rows.append(["本地烈度", "无感"])
+            rows.append(["本地烈度(估值)", "无感"])
 
     p_sec, s_sec = calc_wave_arrival(dist)
     if p_sec is not None:
@@ -502,11 +639,20 @@ def trigger_alert(source_label, origin_name, magnitude, depth,
     elif tier is None or tier == -1:
         play_sound(SOUND_ALERT)
     elif tier == 1:
-        play_sound(SOUND_EEW0)
+        _save_volume()
+        _set_max_volume()
+        play_sound(SOUND_EEW0, sync=True)
+        _restore_volume()
     elif tier == 2:
-        play_sound(SOUND_EEW1)
+        _save_volume()
+        _set_max_volume()
+        play_sound(SOUND_EEW1, sync=True)
+        _restore_volume()
     elif tier == 3:
-        play_sound(SOUND_EEW2)
+        _save_volume()
+        _set_max_volume()
+        play_sound(SOUND_EEW2, sync=True)
+        _restore_volume()
 
     # Windows通知
     win_msg = (f"{origin_time} {origin_name} 深度{depth}km M{magnitude}级 烈度{local_intensity}\n"
@@ -694,7 +840,7 @@ def setup_wizard():
 
     # ---------- 6. 预警分级 ----------
     console.print("\n[bold]--- 预警分级设置 ---[/bold]")
-    console.print("[dim]按烈度范围分级，各分级可分别控制 Windows 弹窗和 Bark 推送[/dim]")
+    console.print("[dim]按烈度(估值)范围分级，各分级可分别控制 Windows 弹窗和 Bark 推送[/dim]")
     default_tiers = {
         'tier1': {'min': 1.0, 'max': 2.0, 'windows': True, 'bark': True},
         'tier2': {'min': 2.0, 'max': 3.0, 'windows': True, 'bark': True},
@@ -1032,7 +1178,7 @@ def print_earthquake_table(title, rows, source_label):
     for row in rows_with_src:
         label = str(row[0])
         val = str(row[1])
-        if '本地烈度' in label:
+        if '本地烈度(估值)' in label:
             cell_style = _intensity_style(val)
             if cell_style:
                 table.add_row(Text(label, style="cyan"), Text(val, style=cell_style))
@@ -2851,8 +2997,6 @@ def main():
         console.print("[red]错误: websocket-client 未安装，WebSocket 数据源将不可用[/red]")
 
     console.print("\n[bold yellow]========== EEW-CLI-Monitor ==========[/bold yellow]")
-    console.print("[bold cyan]中国地图 (输入 map world 查看世界地图)[/bold cyan]")
-    console.print(geo_ascii.CHINA_MAP)
     if not os.path.exists(SOUND_ALERT):
         console.print("[yellow]提示: 普通提示音文件未找到，将无法播放。[/yellow]")
     config, config_found = load_config()
