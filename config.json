@@ -1,0 +1,83 @@
+{
+  "location": {
+    "name": "成都理工",
+    "latitude": 30.673352,
+    "longitude": 104.14126
+  },
+  "sources": {
+    "wolfx": {
+      "enabled": true,
+      "url": "wss://ws-api.wolfx.jp/all_eew",
+      "fallback_urls": []
+    },
+    "p2p": {
+      "enabled": false
+    },
+    "p2pjson": {
+      "enabled": false,
+      "url": "wss://api.p2pquake.net/v2/ws"
+    },
+    "nied": {
+      "enabled": false,
+      "url": "wss://sismotide.top/nied",
+      "fallback_urls": []
+    },
+    "fan": {
+      "enabled": false,
+      "url": "wss://ws.fanstudio.tech/all",
+      "fallback_urls": [
+        "wss://ws.fanstudio.hk/all"
+      ]
+    }
+  },
+  "filters": {
+    "wolfx": {
+      "jma": false,
+      "cenc": true,
+      "sc": true,
+      "fj": true,
+      "cq": true,
+      "cenc_eqlist": false
+    },
+    "p2p": {
+      "jma": false
+    },
+    "p2pjson": {},
+    "nied": {},
+    "fan": {
+      "cea": false,
+      "cwa-eew": false,
+      "jma": false,
+      "cenc": false,
+      "cwa": false,
+      "cea-pr": false,
+      "ningxia": false,
+      "guangxi": false,
+      "shanxi": false,
+      "beijing": false,
+      "yunnan": false,
+      "hko": false,
+      "usgs": false,
+      "sa": false,
+      "emsc": false,
+      "bcsf": false,
+      "gfz": false,
+      "usp": false,
+      "kma": false,
+      "kma-eew": false,
+      "fssn": false,
+      "fssn-cmt": false
+    }
+  },
+  "alert": {
+    "bark_url": "https://api.day.app/ChAnChAngEMegEMe/",
+    "tiers": {
+    "tier1": { "min": 1.0, "max": 2.0 },
+    "tier2": { "min": 2.0, "max": 3.0 },
+    "tier3": { "min": 3.0 }
+
+    }
+  },
+  "export_path": null,
+  "debug": true
+}
