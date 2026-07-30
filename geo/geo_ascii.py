@@ -67,6 +67,81 @@ WORLD_MAP = (
     '# # #   # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #\n'
 )
 
+CHINA_COL_PH = 32
+
+CHINA_COLORMAP = {
+    '0': 'grey23',
+    '1': 'grey30',
+    '2': 'grey37',
+    '3': 'grey46',
+    '4': 'grey54',
+    '5': 'grey62',
+    '6': 'grey70',
+    '7': 'grey78',
+    '8': 'grey82',
+    '9': 'grey89',
+    'a': 'dark_red',
+    'b': 'dark_green',
+    'c': 'dark_blue',
+    'd': 'dark_magenta',
+    'e': 'dark_cyan',
+    'f': 'dark_yellow',
+    'g': 'bright_black',
+    'h': 'grey23',
+    'i': 'grey30',
+    'j': 'grey37',
+    'k': 'grey46',
+    'l': 'grey54',
+    'm': 'grey62',
+    'n': 'grey70',
+    'o': 'grey78',
+    'p': 'grey82',
+    'q': 'grey89',
+    'r': 'dark_red',
+    's': 'dark_green',
+    't': 'dark_blue',
+    'u': 'dark_magenta',
+    'v': 'dark_cyan',
+    'w': 'dark_yellow',
+    'x': 'bright_black',
+    'y': 'grey23',
+}
+
+CHINA_COLORED = (
+    '                                                            4 7 7              \n'
+    '                                                            4 4 7 7            \n'
+    '                                                          4 4 4 4 7 7          \n'
+    '                u u                                   4 4 4 4 4 7 7 7 7 7      \n'
+    '            u u u u u                                       4 4 7 7 7 7 7 7 7  \n'
+    '          u u u u u u                               4 4 4 4 4 6 6 7 7 7 7 7    \n'
+    '          u u u u u u u u u                       4 4 4 4 4 4 4 6 6 6 7 7      \n'
+    '          u u u u u u u u u u r 4 4 4     4 4 4 4 4 4 4 2 5 5 5 5 6 6 6        \n'
+    '    u u u u u u u u u u u r r r r 4 4 4 4 4 4 4 4 4 2 0 2 5   5 5              \n'
+    'u u u u u u u u u u u u s r r s r r r r 4 t 4 q 3 3 2 2                        \n'
+    '  u u u u u u u u u u s s s s s s s s r t t q q 3 3 2 e e   e                  \n'
+    '    u u u u u u p p s s s s s s s s s r r r r q 3 3 f e e e                    \n'
+    '        p p p p p p p s s s s s s s s r r q q q f f f f 9 9                    \n'
+    '        p p p p p p p p p s s s m s m m r q q q f f f b b 9                    \n'
+    '        p p p p p p p p p p p p m m m m m m l l g g g b b 9 9                  \n'
+    '              p p p p p p p p p p m m m m l l h h g g d b a a                  \n'
+    '                p p   p p p     o m m o m n n h h h d d d a                    \n'
+    '                                o o m o n n n h h h d d c c                    \n'
+    '                                o o o o j j j j h i d c c   v                  \n'
+    '                                o o o o   j j j i i i i     v                  \n'
+    '                                  o         j i i                              \n'
+    '                                                                               \n'
+    '                                              k                                \n'
+    '                                                                               \n'
+    '                                                                               \n'
+    '                                                                               \n'
+    '                                                                               \n'
+    '                                                                               \n'
+    '                                                                               \n'
+    '                                                                               \n'
+    '                                                                               \n'
+    '                                                                               \n'
+)
+
 
 def lonlat_to_rc(lon, lat, bbox, pixel_w, pixel_h):
     x_min, y_min, x_max, y_max = bbox
@@ -86,3 +161,29 @@ def plot_on_map(ascii_str, bbox, pixel_w, pixel_h, points):
         if 0 <= r < len(rows) and 0 <= text_c < len(rows[r]):
             rows[r][text_c] = ch
     return '\n'.join(''.join(r) for r in rows)
+
+
+def colorize_china(epi_lon, epi_lat, mon_lon, mon_lat):
+    from rich.text import Text
+    rows = [list(r) for r in CHINA_COLORED.splitlines()]
+    ph = len(rows)
+    for lon, lat, ch in [(epi_lon, epi_lat, '*'), (mon_lon, mon_lat, '@')]:
+        r, c = lonlat_to_rc(lon, lat, CHINA_BBOX, MAP_WIDTH, ph)
+        tc = c * 2
+        if 0 <= r < ph and 0 <= tc < len(rows[r]):
+            rows[r][tc] = ch
+    t = Text()
+    for line in rows:
+        for ch in line:
+            if ch == '*':
+                t.append('*', style='bold white on red')
+            elif ch == '@':
+                t.append('@', style='bold white on green')
+            elif ch == ' ':
+                t.append(' ', style='')
+            elif ch in CHINA_COLORMAP:
+                t.append(ch, style=CHINA_COLORMAP[ch])
+            else:
+                t.append(ch, style='dim')
+        t.append('\n')
+    return t

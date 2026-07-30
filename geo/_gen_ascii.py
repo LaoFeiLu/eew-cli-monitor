@@ -16,8 +16,31 @@ with open(os.path.join(GEO_DIR, 'china.geojson'), encoding='utf-8') as f:
     china = json.load(f)
 
 CHINA_BBOX = (73.0, 3.0, 136.0, 54.0)
-china_ascii = gj2ascii.render(
-    china['features'], width=80, char='#', fill=' ', bbox=CHINA_BBOX
+china_features = [f for f in china['features'] if f.get('geometry') and f['geometry'].get('coordinates')]
+
+# Plain # map (backward compat)
+china_ascii = gj2ascii.render(china_features, width=80, char='#', fill=' ', bbox=CHINA_BBOX)
+
+# Colored map — each province gets a unique char + grey/muted color
+CHARS = [str(i) for i in range(10)] + [chr(ord('a') + i) for i in range(26)]
+COLORS = [
+    'grey23', 'grey30', 'grey37', 'grey46', 'grey54', 'grey62',
+    'grey70', 'grey78', 'grey82', 'grey89',
+    'dark_red', 'dark_green', 'dark_blue',
+    'dark_magenta', 'dark_cyan', 'dark_yellow',
+    'bright_black',
+]
+
+pairs = []
+china_colormap = {}
+for i, feat in enumerate(china_features):
+    ch = CHARS[i]
+    color = COLORS[i % len(COLORS)]
+    pairs.append((feat, ch))
+    china_colormap[ch] = color
+
+china_colored_ascii = gj2ascii.render_multiple(
+    pairs, width=80, fill=' ', bbox=CHINA_BBOX, all_touched=False
 )
 
 # ---- World ----
@@ -31,6 +54,7 @@ world_ascii = gj2ascii.render(
 
 CHINA_PW = 40
 CHINA_PH = len(china_ascii.splitlines())
+CHINA_COL_PH = len(china_colored_ascii.splitlines())
 WORLD_PW = 40
 WORLD_PH = len(world_ascii.splitlines())
 
@@ -63,6 +87,17 @@ lines.append('')
 write_map_var(lines, 'WORLD_MAP', world_ascii)
 lines.append('')
 
+# Colored China map
+lines.append(f'CHINA_COL_PH = {CHINA_COL_PH}')
+lines.append('')
+lines.append('CHINA_COLORMAP = {')
+for ch, color in sorted(china_colormap.items()):
+    lines.append(f"    {ch!r}: {color!r},")
+lines.append('}')
+lines.append('')
+write_map_var(lines, 'CHINA_COLORED', china_colored_ascii)
+lines.append('')
+
 lines.append('''
 def lonlat_to_rc(lon, lat, bbox, pixel_w, pixel_h):
     x_min, y_min, x_max, y_max = bbox
@@ -82,6 +117,32 @@ def plot_on_map(ascii_str, bbox, pixel_w, pixel_h, points):
         if 0 <= r < len(rows) and 0 <= text_c < len(rows[r]):
             rows[r][text_c] = ch
     return '\\n'.join(''.join(r) for r in rows)
+
+
+def colorize_china(epi_lon, epi_lat, mon_lon, mon_lat):
+    from rich.text import Text
+    rows = [list(r) for r in CHINA_COLORED.splitlines()]
+    ph = len(rows)
+    for lon, lat, ch in [(epi_lon, epi_lat, '*'), (mon_lon, mon_lat, '@')]:
+        r, c = lonlat_to_rc(lon, lat, CHINA_BBOX, MAP_WIDTH, ph)
+        tc = c * 2
+        if 0 <= r < ph and 0 <= tc < len(rows[r]):
+            rows[r][tc] = ch
+    t = Text()
+    for line in rows:
+        for ch in line:
+            if ch == '*':
+                t.append('*', style='bold white on red')
+            elif ch == '@':
+                t.append('@', style='bold white on green')
+            elif ch == ' ':
+                t.append(' ', style='')
+            elif ch in CHINA_COLORMAP:
+                t.append(ch, style=CHINA_COLORMAP[ch])
+            else:
+                t.append(ch, style='dim')
+        t.append('\\n')
+    return t
 ''')
 
 output = '\n'.join(lines)
@@ -90,5 +151,6 @@ with open(os.path.join(BASE, 'geo', 'geo_ascii.py'), 'w', encoding='utf-8') as f
     f.write(output)
 
 print('Regenerated geo/geo_ascii.py')
-print(f'  China: {CHINA_PH}x{CHINA_PW}')
-print(f'  World: {WORLD_PH}x{WORLD_PW}')
+print(f'  China (plain):  {CHINA_PH}x{CHINA_PW}')
+print(f'  China (colored): {CHINA_COL_PH}x{CHINA_PW}')
+print(f'  World:          {WORLD_PH}x{WORLD_PW}')

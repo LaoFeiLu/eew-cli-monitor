@@ -211,16 +211,18 @@ def _in_china(lon, lat):
     xmin, ymin, xmax, ymax = geo_ascii.CHINA_BBOX
     return xmin <= lon <= xmax and ymin <= lat <= ymax
 
-def _color_map(ascii_str):
+def _colorize_world(ascii_str):
     t = Text()
     for line in ascii_str.splitlines():
         for ch in line:
             if ch == '*':
-                t.append('*', style='bold red')
+                t.append('*', style='bold white on red')
             elif ch == '@':
-                t.append('@', style='bold green')
+                t.append('@', style='bold white on green')
+            elif ch == '#':
+                t.append(ch, style='grey54')
             else:
-                t.append(ch, style='white')
+                t.append(ch, style='dim')
         t.append('\n')
     return t
 
@@ -230,24 +232,25 @@ def show_epicenter_map(lat, lon):
     try:
         lon_f = float(lon)
         lat_f = float(lat)
-        points = [(lon_f, lat_f, '*')]
-        if USER_LATITUDE is not None and USER_LONGITUDE is not None:
-            points.append((USER_LONGITUDE, USER_LATITUDE, '@'))
+        mon_lon = USER_LONGITUDE if USER_LATITUDE is not None else None
+        mon_lat = USER_LATITUDE if USER_LONGITUDE is not None else None
 
+        # World map — always shown, markers highlighted
         console.print("[bold cyan]世界地图 (*震中 @监控点)[/bold cyan]")
+        points = [(lon_f, lat_f, '*')]
+        if mon_lon is not None and mon_lat is not None:
+            points.append((mon_lon, mon_lat, '@'))
         world_mapped = geo_ascii.plot_on_map(
             geo_ascii.WORLD_MAP, geo_ascii.WORLD_BBOX,
             geo_ascii.WORLD_WIDTH, geo_ascii.WORLD_HEIGHT, points
         )
-        console.print(_color_map(world_mapped))
+        console.print(_colorize_world(world_mapped))
 
-        if _in_china(lon_f, lat_f):
+        # China map — colored per-province, only if epicenter in China
+        if _in_china(lon_f, lat_f) and mon_lon is not None and mon_lat is not None:
+            china_t = geo_ascii.colorize_china(lon_f, lat_f, mon_lon, mon_lat)
             console.print("[bold cyan]中国地图 (*震中 @监控点)[/bold cyan]")
-            china_mapped = geo_ascii.plot_on_map(
-                geo_ascii.CHINA_MAP, geo_ascii.CHINA_BBOX,
-                geo_ascii.CHINA_WIDTH, geo_ascii.CHINA_HEIGHT, points
-            )
-            console.print(_color_map(china_mapped))
+            console.print(china_t)
     except Exception:
         pass
 
