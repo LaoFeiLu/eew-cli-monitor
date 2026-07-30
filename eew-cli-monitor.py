@@ -456,6 +456,7 @@ def show_epicenter_map(lat, lon, mag=None):
             china_t = _colorize_china_with_intensity(lon_f, lat_f, mon_lon, mon_lat, mag_f)
             console.print("[bold cyan] (*震中 @监控点)[/bold cyan]")
             console.print(china_t)
+        console.print()
     except Exception:
         pass
 
@@ -655,36 +656,43 @@ def trigger_alert(source_label, origin_name, magnitude, depth,
         _restore_volume()
 
     # Windows通知
-    win_msg = (f"{origin_time} {origin_name} 深度{depth}km M{magnitude}级 烈度{local_intensity}\n"
+    local_intensity_display = f"{local_intensity}" if local_intensity > 0 else "无感"
+    win_msg = (f"{origin_time} {origin_name} 深度{depth}km M{magnitude}级\n"
+               f"震中烈度: {max_intensity if max_intensity and max_intensity != 'N/A' else '不明'}\n"
+               f"到达{loc_name}距离{distance_km:.0f}km\n"
+               f"你所在位置预计烈度: {local_intensity_display}\n"
                f"P波 {p_seconds}秒后到达 | S波 {s_seconds}秒后到达\n"
-               f"到达{loc_name}距离{distance_km:.0f}km，预估本地烈度{local_intensity}\n"
                f"信号源: {source_label}")
-    show_windows_notification(f"地震预警预计烈度{local_intensity}", win_msg)
+    show_windows_notification(f"你所在位置预计烈度 {local_intensity_display}", win_msg)
 
     # Bark
+    # ---------- Bark 推送（明确区分震中烈度与本地烈度） ----------
     tier_cfg = tiers_config.get(f'tier{tier}', {}) if tier is not None and tier > 0 else {}
     bark_enabled = tier_cfg.get('bark', True) if tier is not None and tier > 0 else True
     if ALERT_BARK_URL and bark_enabled:
         title_base = f"地震预警 {origin_name}"
+        local_intensity_display = f"{local_intensity}" if local_intensity > 0 else "无感"
+        max_intensity_display = max_intensity if max_intensity and max_intensity != 'N/A' else "不明"
+
         if tier is None or tier == -1 or tier == 0:
             send_bark(
                 title=f"{title_base} {p_seconds}秒后到达",
-                subtitle=f"预计烈度 {local_intensity}",
-                body=f"距离震中 {distance_km:.0f}km，S波预计 {s_seconds}秒后到达，信号源: {source_label}",
+                subtitle=f"你所在位置预计烈度: {local_intensity_display}",
+                body=f"震中烈度: {max_intensity_display}\n距离震中 {distance_km:.0f}km\nS波预计 {s_seconds}秒后到达\n信号源: {source_label}",
                 level="passive"
             )
         elif tier == 1:
             send_bark(
                 title=f"{title_base} {p_seconds}秒后到达",
-                subtitle=f"震级 M{magnitude} 深度 {depth}km，预估烈度 {local_intensity}",
-                body=f"预计 {p_seconds}秒后到达 信号源: {source_label}",
+                subtitle=f"震中烈度: {max_intensity_display} | 你所在位置预计烈度: {local_intensity_display}",
+                body=f"震级 M{magnitude} 深度 {depth}km\nP波 {p_seconds}秒后到达\n信号源: {source_label}",
                 level="active"
             )
         elif tier >= 2:
             send_bark(
                 title=f"{title_base} {p_seconds}秒后到达",
-                subtitle=f"震级 M{magnitude} 深度 {depth}km，预估烈度 {local_intensity}",
-                body=f"预计 {p_seconds}秒后到达 信号源: {source_label}",
+                subtitle=f"震中烈度: {max_intensity_display} | 你所在位置预计烈度: {local_intensity_display}",
+                body=f"震级 M{magnitude} 深度 {depth}km\nP波 {p_seconds}秒后到达\n信号源: {source_label}",
                 level="critical",
                 volume=10, call="1", sound="alarm"
             )
@@ -2556,14 +2564,18 @@ def start_fan_websocket():
 # ---------- Wolfx WebSocket ----------
 def on_message_factory(source_key):
     _heartbeat_shown = False
+
     def on_message(ws, message):
         nonlocal _heartbeat_shown
+
         if not SOURCE_CONFIG.get(source_key, {}).get('enabled', True):
             return
+
         try:
             data = json.loads(message)
             if not isinstance(data, dict):
                 return
+
             msg_type = data.get('type', '')
             if msg_type == 'heartbeat':
                 if not _heartbeat_shown:
@@ -2571,23 +2583,29 @@ def on_message_factory(source_key):
                     ts = data.get('timestamp', 0)
                     if ts:
                         delay = abs(int(time.time() * 1000 - int(ts)))
-                        console.print(f"\033[1A\033[K[green]{source_key} WebSocket 已连接 ({SOURCE_CONFIG[source_key]['name']}，延迟{delay}ms)[/green]")
+                        sys.stdout.write(
+                            f"\033[1A\033[K\033[32m{datetime.now().strftime('%H:%M:%S')} {source_key} WebSocket 已连接 ({SOURCE_CONFIG[source_key]['name']}，延迟{delay}ms)\033[0m\n"
+                        )
+                        sys.stdout.flush()
                 try:
                     ws.send("ping")
                 except:
                     pass
                 return
-            if msg_type.endswith('_eew'):
-                data['type'] = msg_type[:-4]
-            if data.get('type') == 'cenc_eqlist':
+            if msg_type == 'cenc_eqlist':
                 process_cenc_eqlist(data, source_key, SOURCE_DISPLAY.get(source_key, source_key))
                 return
+
             if 'EventID' in data or 'event_id' in data:
                 process_eew(data, source_key)
+
         except json.JSONDecodeError:
             pass
-    return on_message
+        except Exception as e:
+            if DEBUG:
+                console.print(f"[dim][DEBUG] {source_key} 消息处理异常: {e}[/dim]")
 
+    return on_message
 
 def on_error_factory(source_key):
     def on_error(ws, error):
@@ -2996,7 +3014,7 @@ def main():
     if not WS_AVAILABLE:
         console.print("[red]错误: websocket-client 未安装，WebSocket 数据源将不可用[/red]")
 
-    console.print("\n[bold yellow]========== EEW-CLI-Monitor ==========[/bold yellow]")
+    console.print("\n[bold yellow]========== EEW-CLI-Monitor V1.0.9==========[/bold yellow]")
     if not os.path.exists(SOUND_ALERT):
         console.print("[yellow]提示: 普通提示音文件未找到，将无法播放。[/yellow]")
     config, config_found = load_config()
