@@ -67,6 +67,7 @@ WORLD_MAP = (
     '# # #   # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #\n'
 )
 
+
 def lonlat_to_rc(lon, lat, bbox, pixel_w, pixel_h):
     x_min, y_min, x_max, y_max = bbox
     cell_size = (x_max - x_min) / pixel_w
@@ -76,6 +77,7 @@ def lonlat_to_rc(lon, lat, bbox, pixel_w, pixel_h):
     row = max(0, min(row, pixel_h - 1))
     return row, col
 
+
 def plot_on_map(ascii_str, bbox, pixel_w, pixel_h, points):
     rows = [list(r) for r in ascii_str.splitlines()]
     for lon, lat, ch in points:
@@ -84,4 +86,3 @@ def plot_on_map(ascii_str, bbox, pixel_w, pixel_h, points):
         if 0 <= r < len(rows) and 0 <= text_c < len(rows[r]):
             rows[r][text_c] = ch
     return '\n'.join(''.join(r) for r in rows)
-
